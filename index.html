@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>TCG Live Queue</title>
+<script src="/socket.io/socket.io.js"></script>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#272c38;
+    --text:#e8ebf2; --muted:#8b93a7; --accent:#4f8cff; --accent2:#2b6bff;
+    --pri:#ffb020; --pri-bg:#3a2c0c; --done:#25c26e; --danger:#ff5d5d;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    background:var(--bg);color:var(--text);-webkit-font-smoothing:antialiased}
+  header{position:sticky;top:0;z-index:5;background:linear-gradient(180deg,#141824,#0f1115);
+    border-bottom:1px solid var(--line);padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+  header h1{font-size:17px;margin:0;letter-spacing:.3px}
+  .dot{width:9px;height:9px;border-radius:50%;background:#555;display:inline-block;margin-right:6px}
+  .dot.live{background:var(--done);box-shadow:0 0 8px var(--done)}
+  .stats{display:flex;gap:18px;margin-left:auto;flex-wrap:wrap}
+  .stat{text-align:center;min-width:64px}
+  .stat b{display:block;font-size:20px;line-height:1.1}
+  .stat span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
+  main{max-width:920px;margin:0 auto;padding:18px 16px 80px}
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  .toolbar input{flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--line);
+    color:var(--text);padding:9px 12px;border-radius:9px;font-size:13px}
+  button{cursor:pointer;border:none;border-radius:9px;font-size:13px;font-weight:600;padding:9px 14px;
+    background:var(--panel2);color:var(--text);border:1px solid var(--line);transition:.12s}
+  button:hover{filter:brightness(1.15)}
+  button.primary{background:var(--accent2);border-color:var(--accent2)}
+  button.ghost{background:transparent}
+  .sectitle{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:22px 4px 10px}
+  .slot{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);
+    border-radius:12px;padding:12px 14px;margin-bottom:9px;animation:pop .18s ease}
+  .slot.priority{border-color:var(--pri);background:linear-gradient(90deg,var(--pri-bg),var(--panel))}
+  .slot.bumped{outline:2px solid var(--accent)}
+  @keyframes pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  .pos{font-variant-numeric:tabular-nums;font-weight:800;font-size:18px;width:34px;text-align:center;color:var(--muted)}
+  .slot.priority .pos{color:var(--pri)}
+  .who{flex:1;min-width:0}
+  .who .name{font-weight:700;font-size:15px;display:flex;align-items:center;gap:7px}
+  .badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;letter-spacing:.4px}
+  .badge.pri{background:var(--pri);color:#2a1e00}
+  .badge.multi{background:#31384a;color:#cdd4e4}
+  .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
+  .actions{display:flex;gap:7px}
+  .actions button{padding:8px 11px}
+  .fulfill{background:var(--done);border-color:var(--done);color:#04180d}
+  .bumpb{background:transparent;color:var(--accent)}
+  .empty{color:var(--muted);text-align:center;padding:40px;border:1px dashed var(--line);border-radius:12px}
+  .done-row{display:flex;gap:12px;align-items:center;padding:8px 12px;color:var(--muted);font-size:13px;
+    border-bottom:1px solid var(--line)}
+  .done-row .name{color:var(--text)}
+  .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20}
+  .modal.open{display:flex}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;width:min(520px,92vw)}
+  .card h3{margin:0 0 6px}
+  .card p{color:var(--muted);font-size:13px;margin:0 0 14px}
+  .card textarea{width:100%;height:110px;background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    border-radius:9px;padding:10px;font-size:13px;font-family:inherit;resize:vertical}
+  .row{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+  .chip{background:var(--pri-bg);color:var(--pri);border:1px solid var(--pri);border-radius:20px;padding:3px 10px;font-size:12px}
+</style>
+</head>
+<body>
+<header>
+  <h1><span id="dot" class="dot"></span>TCG Live Queue</h1>
+  <div class="stats">
+    <div class="stat"><b id="s-active">0</b><span>In queue</span></div>
+    <div class="stat"><b id="s-pri">0</b><span>Priority</span></div>
+    <div class="stat"><b id="s-val">$0</b><span>Queue value</span></div>
+    <div class="stat"><b id="s-done">0</b><span>Fulfilled</span></div>
+  </div>
+</header>
+
+<main>
+  <div class="toolbar">
+    <input id="search" placeholder="Filter by buyer…" oninput="render()" />
+    <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
+    <button class="ghost" onclick="resetQueue()">Reset</button>
+  </div>
+
+  <div class="chips" id="pri-chips"></div>
+
+  <div class="sectitle">Active queue — top is next</div>
+  <div id="queue"></div>
+
+  <div class="sectitle">Recently fulfilled</div>
+  <div id="fulfilled"></div>
+</main>
+
+<div class="modal" id="modal">
+  <div class="card">
+    <h3>Priority items</h3>
+    <p>Any order containing one of these (matched inside the item name or SKU) jumps to the top of the queue. One per line. Example: <em>break</em>, <em>slab</em>, <em>PSA 10</em>.</p>
+    <textarea id="pri-input" placeholder="break&#10;slab&#10;box break"></textarea>
+    <div class="row">
+      <button class="ghost" onclick="closePriority()">Cancel</button>
+      <button class="primary" onclick="savePriority()">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+  const socket = io();
+  let state = { queue: [], fulfilled: [], stats: {}, config: { priorityItems: [] } };
+
+  socket.on('connect', () => document.getElementById('dot').classList.add('live'));
+  socket.on('disconnect', () => document.getElementById('dot').classList.remove('live'));
+  socket.on('state', (s) => { state = s; render(); });
+
+  function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
+  function money(n){return '$'+Number(n||0).toFixed(2);}
+
+  async function post(url){ await fetch(url,{method:'POST'}); }
+  function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
+  function bump(key){ post('/api/bump/'+encodeURIComponent(key)); }
+  async function resetQueue(){
+    if(confirm('Clear the entire active + fulfilled queue? (Priority item settings are kept.)'))
+      await post('/api/reset');
+  }
+
+  function openPriority(){
+    document.getElementById('pri-input').value = (state.config.priorityItems||[]).join('\n');
+    document.getElementById('modal').classList.add('open');
+  }
+  function closePriority(){ document.getElementById('modal').classList.remove('open'); }
+  async function savePriority(){
+    const items = document.getElementById('pri-input').value.split('\n').map(s=>s.trim()).filter(Boolean);
+    await fetch('/api/priority-items',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({items})});
+    closePriority();
+  }
+
+  function render(){
+    const st = state.stats||{};
+    document.getElementById('s-active').textContent = st.activeCount||0;
+    document.getElementById('s-pri').textContent = st.priorityCount||0;
+    document.getElementById('s-val').textContent = money(st.activeValue);
+    document.getElementById('s-done').textContent = st.fulfilledCount||0;
+
+    const chips = document.getElementById('pri-chips');
+    chips.innerHTML = (state.config.priorityItems||[]).map(p=>`<span class="chip">⭐ ${esc(p)}</span>`).join('');
+
+    const filter = (document.getElementById('search').value||'').toLowerCase();
+    const q = (state.queue||[]).filter(e=>!filter || e.buyer.toLowerCase().includes(filter));
+    const qEl = document.getElementById('queue');
+    if(!q.length){
+      qEl.innerHTML = '<div class="empty">Queue is empty — waiting on orders.</div>';
+    } else {
+      qEl.innerHTML = q.map(e=>{
+        const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
+        const cls = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
+        const badges = (e.isPriority?'<span class="badge pri">PRIORITY</span>':'')
+          + (e.orderCount>1?`<span class="badge multi">${e.orderCount} orders</span>`:'');
+        return `<div class="${cls}">
+          <div class="pos">${e.position}</div>
+          <div class="who">
+            <div class="name">${esc(e.buyer)} ${badges}</div>
+            <div class="items">${esc(itemStr)}</div>
+          </div>
+          <div class="money">${money(e.total)}</div>
+          <div class="actions">
+            ${e.bumped?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}
+            <button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button>
+          </div>
+        </div>`;
+      }).join('');
+    }
+
+    const fEl = document.getElementById('fulfilled');
+    const f = state.fulfilled||[];
+    fEl.innerHTML = f.length ? f.map(s=>`<div class="done-row">
+        <span class="name">${esc(s.buyer)}</span>
+        <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
+        <span style="margin-left:auto">${money(s.total)}</span>
+      </div>`).join('') : '<div class="empty">Nothing fulfilled yet.</div>';
+  }
+
+  render();
+</script>
+</body>
+</html>
