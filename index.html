@@ -92,6 +92,7 @@
     <input id="search" placeholder="Filter by buyer…" oninput="render()" />
     <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
     <button class="ghost" onclick="resetQueue()">Reset</button>
+    <a href="{{ADMIN}}/history" style="text-decoration:none"><button class="ghost">🗂 Past streams ↗</button></a>
     <a href="/" target="_blank" style="text-decoration:none"><button class="ghost">Public view ↗</button></a>
     <a href="{{ADMIN}}/logout" style="text-decoration:none"><button class="ghost">Log out</button></a>
   </div>
@@ -110,9 +111,6 @@
     <a href="/api/export" style="text-decoration:none;margin-left:auto"><button class="ghost">⬇ Export CSV</button></a>
   </div>
   <div id="fulfilled"></div>
-
-  <div class="sectitle">Past streams — admin history</div>
-  <div id="history"></div>
 </main>
 
 <div class="modal" id="modal">
@@ -220,17 +218,6 @@
         <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
         <span style="margin-left:auto">${money(s.total)}</span>
       </div>`).join('') : '<div class="empty">Nothing fulfilled yet this stream.</div>';
-
-    const hEl = document.getElementById('history');
-    const h = state.history||[];
-    hEl.innerHTML = h.length ? h.map(s=>{
-      const label = new Date(s.endedAt).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
-      return `<div class="done-row">
-        <span class="name">Stream ending ${label}</span>
-        <span>${s.count} order${s.count===1?'':'s'} · ${money(s.value)}</span>
-        <a href="/api/export/${encodeURIComponent(s.id)}" style="text-decoration:none;margin-left:auto"><button class="ghost">⬇ Export</button></a>
-      </div>`;
-    }).join('') : '<div class="empty">No past streams yet — history fills in each time you start a new live.</div>';
   }
 
   render();

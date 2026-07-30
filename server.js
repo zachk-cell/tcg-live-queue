@@ -168,6 +168,8 @@ app.get(ADMIN + '/logout', (_req, res) => {
   res.setHeader('Set-Cookie', 'tcgauth=; HttpOnly; Secure; Path=/; Max-Age=0; SameSite=Lax');
   res.redirect(ADMIN);
 });
+app.get(ADMIN + '/history', (req, res) =>
+  sendAdminPage(res, isAuthed(req) ? 'history.html' : 'login.html'));
 
 // ---------- Control API (auth required) ----------
 app.get('/api/state', requireAuth, (_req, res) => res.json(queue.snapshot()));
@@ -203,6 +205,8 @@ function sendCsv(res, filename, records) {
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
   res.send(toCsv(records));
 }
+// Past-stream summaries for the history page.
+app.get('/api/history', requireAuth, (_req, res) => res.json({ history: queue.snapshot().history }));
 // Current stream's fulfilled orders.
 app.get('/api/export', requireAuth, (_req, res) =>
   sendCsv(res, 'fulfilled-current.csv', queue.fulfilledRecords()));
