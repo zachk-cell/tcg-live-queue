@@ -57,7 +57,14 @@ function applyTokenData(d) {
   if (!d) return;
   if (d.access_token) tokens.accessToken = d.access_token;
   if (d.refresh_token) tokens.refreshToken = d.refresh_token;
-  if (d.access_token_expire_in) tokens.accessExpireAt = Date.now() + d.access_token_expire_in * 1000 - 60000;
+  // TikTok returns access_token_expire_in as an ABSOLUTE unix epoch (seconds),
+  // not a duration. Guard for both: a value > 1e9 is an absolute epoch, a small
+  // value is a duration in seconds.
+  if (d.access_token_expire_in) {
+    const v = Number(d.access_token_expire_in);
+    const absMs = v > 1e9 ? v * 1000 : Date.now() + v * 1000;
+    tokens.accessExpireAt = absMs - 60000; // refresh a minute early
+  }
   if (d.seller_name) tokens.sellerName = d.seller_name;
   tokens.lastError = '';
   persist();
@@ -95,11 +102,12 @@ function sign(pathName, params, body = '') {
   return crypto.createHmac('sha256', APP_SECRET).update(base).digest('hex');
 }
 
-async function apiCall(method, pathName, extraParams = {}, jsonBody = null, retry = true) {
+async function apiCall(method, pathName, extraParams = {}, jsonBody = null, retry = true, includeShopCipher = true) {
   const params = {
     app_key: APP_KEY,
     timestamp: String(Math.floor(Date.now() / 1000)),
-    ...(tokens.shopCipher ? { shop_cipher: tokens.shopCipher } : {}),
+    // The authorization/shops endpoint rejects shop_cipher; other endpoints need it.
+    ...((includeShopCipher && tokens.shopCipher) ? { shop_cipher: tokens.shopCipher } : {}),
     ...extraParams,
   };
   const bodyStr = jsonBody ? JSON.stringify(jsonBody) : '';
@@ -114,14 +122,14 @@ async function apiCall(method, pathName, extraParams = {}, jsonBody = null, retr
   // Refresh + retry once on any token-related error.
   if (retry && tokens.refreshToken && body && body.code && /token|auth|expire/i.test(JSON.stringify(body))) {
     try { await tokenRefresh(); } catch (e) { tokens.lastError = e.message; persist(); return body; }
-    return apiCall(method, pathName, extraParams, jsonBody, false);
+    return apiCall(method, pathName, extraParams, jsonBody, false, includeShopCipher);
   }
   return body;
 }
 
 async function getShopCipher() {
   const pathName = `/authorization/${API_VERSION}/shops`;
-  const body = await apiCall('GET', pathName);
+  const body = await apiCall('GET', pathName, {}, null, true, false);
   const shop = body?.data?.shops?.[0];
   if (shop && shop.cipher) {
     tokens.shopCipher = shop.cipher;
@@ -142,7 +150,7 @@ async function getShopCipher() {
 // Debug helper: return the raw shops-endpoint response (used by an admin route).
 export async function debugShops() {
   const pathName = `/authorization/${API_VERSION}/shops`;
-  const raw = await apiCall('GET', pathName);
+  const raw = await apiCall('GET', pathName, {}, null, true, false);
   return {
     tokenState: {
       hasAccess: !!tokens.accessToken,
@@ -151,9 +159,6 @@ export async function debugShops() {
       accessExpireAt: tokens.accessExpireAt,
       sellerName: tokens.sellerName,
       shopId: tokens.shopId,
-      shopCipher: tokens.shopCipher,
-      // Admin-only: needed to seed TIKTOK_REFRESH_TOKEN in env for durable reconnect.
-      refreshToken: tokens.refreshToken,
     },
     apiBase: API_BASE,
     apiVersion: API_VERSION,
