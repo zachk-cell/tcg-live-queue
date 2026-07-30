@@ -199,7 +199,7 @@
     }
     const emptyEl = qEl.querySelector('.empty'); if(emptyEl) emptyEl.remove();
     const seen = new Set();
-    for(const e of list){
+    list.forEach((e, idx) => {
       seen.add(e.key);
       let node = slotNodes.get(e.key);
       const sig = slotSig(e);
@@ -211,12 +211,14 @@
         slotNodes.set(e.key, node);
         setTimeout(()=>node.classList.remove('new'), 260);
       } else if(node._sig !== sig){
+        // update only the changed row's contents in place
         node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
         node.innerHTML = slotInner(e);
         node._sig = sig;
       }
-      qEl.appendChild(node); // reorder in place — does not recreate the row
-    }
+      // move into position ONLY if it's not already there (no needless re-attach)
+      if(qEl.children[idx] !== node) qEl.insertBefore(node, qEl.children[idx] || null);
+    });
     for(const [key,node] of slotNodes){ if(!seen.has(key)){ node.remove(); slotNodes.delete(key); } }
   }
 
