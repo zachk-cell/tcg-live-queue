@@ -34,7 +34,8 @@
   button.ghost{background:transparent}
   .sectitle{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:22px 4px 10px}
   .slot{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);
-    border-radius:12px;padding:12px 14px;margin-bottom:9px;animation:pop .18s ease}
+    border-radius:12px;padding:12px 14px;margin-bottom:9px}
+  .slot.new{animation:pop .18s ease}
   .slot.priority{border-color:var(--pri);background:linear-gradient(90deg,var(--pri-bg),var(--panel))}
   .slot.bumped{outline:2px solid var(--accent)}
   @keyframes pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
@@ -165,6 +166,57 @@
     closePriority();
   }
 
+  // --- In-place list rendering so updates don't flash ---
+  const slotNodes = new Map(); // key -> element (reused across updates)
+  let fulfilledSig = '';
+  function slotInner(e){
+    const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
+    const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
+    const countBadge = `<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
+    const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
+    return `<div class="pos">${e.position}</div>`
+      + `<div class="who"><div class="name">${esc(e.buyer)} ${priBadge} ${countBadge} ${ordNos}</div>`
+      + `<div class="items">${esc(itemStr)}</div></div>`
+      + `<div class="money">${money(e.total)}</div>`
+      + `<div class="actions">${e.bumped?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
+      + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`;
+  }
+  function slotSig(e){
+    return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.orderIds.join(','),
+      e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
+  }
+  function renderQueue(){
+    const filter = (document.getElementById('search').value||'').toLowerCase();
+    const list = (state.queue||[]).filter(e=>!filter || e.buyer.toLowerCase().includes(filter));
+    const qEl = document.getElementById('queue');
+    if(!list.length){
+      if(!qEl.querySelector('.empty')) qEl.innerHTML = '<div class="empty">Queue is empty — waiting on orders.</div>';
+      slotNodes.forEach(n=>n.remove()); slotNodes.clear();
+      return;
+    }
+    const emptyEl = qEl.querySelector('.empty'); if(emptyEl) emptyEl.remove();
+    const seen = new Set();
+    for(const e of list){
+      seen.add(e.key);
+      let node = slotNodes.get(e.key);
+      const sig = slotSig(e);
+      if(!node){
+        node = document.createElement('div');
+        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
+        node.innerHTML = slotInner(e);
+        node._sig = sig;
+        slotNodes.set(e.key, node);
+        setTimeout(()=>node.classList.remove('new'), 260);
+      } else if(node._sig !== sig){
+        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
+        node.innerHTML = slotInner(e);
+        node._sig = sig;
+      }
+      qEl.appendChild(node); // reorder in place — does not recreate the row
+    }
+    for(const [key,node] of slotNodes){ if(!seen.has(key)){ node.remove(); slotNodes.delete(key); } }
+  }
+
   function render(){
     const st = state.stats||{};
     const live = !!st.live;
@@ -182,37 +234,19 @@
     document.getElementById('s-done').textContent = st.fulfilledCount||0;
 
     const chips = document.getElementById('pri-chips');
-    chips.innerHTML = (state.config.priorityItems||[]).map(p=>`<span class="chip">⭐ ${esc(p)}</span>`).join('');
-
-    const filter = (document.getElementById('search').value||'').toLowerCase();
-    const q = (state.queue||[]).filter(e=>!filter || e.buyer.toLowerCase().includes(filter));
-    const qEl = document.getElementById('queue');
-    if(!q.length){
-      qEl.innerHTML = '<div class="empty">Queue is empty — waiting on orders.</div>';
-    } else {
-      qEl.innerHTML = q.map(e=>{
-        const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
-        const cls = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
-        const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
-        const countBadge = `<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
-        const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
-        return `<div class="${cls}">
-          <div class="pos">${e.position}</div>
-          <div class="who">
-            <div class="name">${esc(e.buyer)} ${priBadge} ${countBadge} ${ordNos}</div>
-            <div class="items">${esc(itemStr)}</div>
-          </div>
-          <div class="money">${money(e.total)}</div>
-          <div class="actions">
-            ${e.bumped?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}
-            <button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button>
-          </div>
-        </div>`;
-      }).join('');
+    const chipSig = (state.config.priorityItems||[]).join('|');
+    if(chips._sig !== chipSig){
+      chips._sig = chipSig;
+      chips.innerHTML = (state.config.priorityItems||[]).map(p=>`<span class="chip">⭐ ${esc(p)}</span>`).join('');
     }
+
+    renderQueue();
 
     const fEl = document.getElementById('fulfilled');
     const f = state.fulfilled||[];
+    const fSig = JSON.stringify(f.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
+    if(fSig === fulfilledSig) return;
+    fulfilledSig = fSig;
     fEl.innerHTML = f.length ? f.map(s=>`<div class="done-row">
         <span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span>
         <span class="name">${esc(s.buyer)}</span>
