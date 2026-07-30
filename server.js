@@ -17,7 +17,7 @@ import { Server as IOServer } from 'socket.io';
 import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
-import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus } from './tiktok.js';
+import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, debugShops, refetchShopCipher } from './tiktok.js';
 import { startDiscord, discordEnabled } from './discord.js';
 import { startSimulator } from './simulator.js';
 
@@ -217,6 +217,16 @@ app.get('/api/export/:id', requireAuth, (req, res) => {
 // ---------- TikTok Shop ingest ----------
 mountAuth(app, ADMIN); // /auth/tiktok/callback (Redirect URL target)
 app.get('/api/tiktok-status', requireAuth, (_req, res) => res.json(tiktokStatus()));
+// Debug: inspect the raw shops-endpoint response (admin only).
+app.get('/api/tiktok-debug', requireAuth, async (_req, res) => {
+  try { res.json(await debugShops()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Debug: force a fresh shop-cipher fetch with the current access token (admin only).
+app.post('/api/tiktok-refetch', requireAuth, async (_req, res) => {
+  try { res.json(await refetchShopCipher()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // ---------- Real-time: two namespaces ----------
 const panelNs = io.of('/panel');

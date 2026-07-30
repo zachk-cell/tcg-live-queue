@@ -123,13 +123,45 @@ async function getShopCipher() {
   const pathName = `/authorization/${API_VERSION}/shops`;
   const body = await apiCall('GET', pathName);
   const shop = body?.data?.shops?.[0];
-  if (shop) {
+  if (shop && shop.cipher) {
     tokens.shopCipher = shop.cipher;
     tokens.shopId = shop.id;
     if (shop.name) tokens.sellerName = tokens.sellerName || shop.name;
+    tokens.lastError = '';
     persist();
+    console.log('[tiktok] shop cipher acquired for', tokens.sellerName || tokens.shopId);
+  } else {
+    // Record why so the panel / debug route can surface it.
+    tokens.lastError = 'get-shops: ' + JSON.stringify(body).slice(0, 300);
+    persist();
+    console.warn('[tiktok] get-shops returned no usable cipher:', JSON.stringify(body).slice(0, 500));
   }
   return shop;
+}
+
+// Debug helper: return the raw shops-endpoint response (used by an admin route).
+export async function debugShops() {
+  const pathName = `/authorization/${API_VERSION}/shops`;
+  const raw = await apiCall('GET', pathName);
+  return {
+    tokenState: {
+      hasAccess: !!tokens.accessToken,
+      hasRefresh: !!tokens.refreshToken,
+      hasCipher: !!tokens.shopCipher,
+      accessExpireAt: tokens.accessExpireAt,
+      sellerName: tokens.sellerName,
+      shopId: tokens.shopId,
+    },
+    apiBase: API_BASE,
+    apiVersion: API_VERSION,
+    shopsResponse: raw,
+  };
+}
+
+// Debug helper: force a fresh getShopCipher using current access token.
+export async function refetchShopCipher() {
+  await getShopCipher();
+  return tiktokStatus();
 }
 
 // ---------------- Orders ----------------
