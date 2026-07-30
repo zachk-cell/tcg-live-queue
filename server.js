@@ -112,7 +112,7 @@ function isAuthed(req) {
 function requireAuth(req, res, next) {
   if (isAuthed(req)) return next();
   if (req.path.startsWith('/api/')) return res.status(401).json({ error: 'unauthorized' });
-  return res.redirect('/login');
+  return res.redirect('/');
 }
 
 // ---------- Public (sanitized) view of the queue ----------
@@ -128,30 +128,41 @@ function publicView() {
   };
 }
 
-// ---------- Pages ----------
-app.get('/login', (_req, res) => res.sendFile(path.join(__dirname, 'login.html')));
-app.post('/login', (req, res) => {
+// ---------- Admin surface (secret path) ----------
+// The public queue is the main site (/). The control panel + login live under
+// a secret, unlinked path (ADMIN_PATH) so the admin surface is only reachable
+// by someone who knows the exact URL. Password + 2FA still protect it.
+const ADMIN = '/' + (process.env.ADMIN_PATH || 'admin').replace(/^\/+|\/+$/g, '');
+
+function sendAdminPage(res, file) {
+  // Inject the secret admin base path into the page's links/form actions.
+  const html = fs.readFileSync(path.join(__dirname, file), 'utf8');
+  res.type('html').send(html.split('{{ADMIN}}').join(ADMIN));
+}
+
+// ---------- Public pages (primary site, no auth) ----------
+app.get('/', (_req, res) => res.sendFile(path.join(__dirname, 'public.html')));
+app.get('/public', (_req, res) => res.redirect('/')); // keep old links working
+app.get('/privacy', (_req, res) => res.sendFile(path.join(__dirname, 'privacy.html')));
+app.get('/api/public-state', (_req, res) => res.json(publicView()));
+
+// ---------- Admin pages (secret path) ----------
+app.get(ADMIN, (req, res) =>
+  sendAdminPage(res, isAuthed(req) ? 'index.html' : 'login.html'));
+app.post(ADMIN + '/login', (req, res) => {
   const pw = (req.body && req.body.password) || '';
   const okPw = pw.length === PANEL_PASSWORD.length &&
     crypto.timingSafeEqual(Buffer.from(pw), Buffer.from(PANEL_PASSWORD));
   const okMfa = verifySecondFactor(req.body && req.body.code);
-  if (!okPw || !okMfa) return res.redirect('/login?e=1');
+  if (!okPw || !okMfa) return res.redirect(ADMIN + '?e=1');
   res.setHeader('Set-Cookie',
     `tcgauth=${makeToken()}; HttpOnly; Secure; Path=/; Max-Age=2592000; SameSite=Lax`);
-  res.redirect('/');
+  res.redirect(ADMIN);
 });
-app.get('/logout', (_req, res) => {
+app.get(ADMIN + '/logout', (_req, res) => {
   res.setHeader('Set-Cookie', 'tcgauth=; HttpOnly; Secure; Path=/; Max-Age=0; SameSite=Lax');
-  res.redirect('/login');
+  res.redirect(ADMIN);
 });
-
-// Public buyer-facing view + privacy policy (no auth).
-app.get('/public', (_req, res) => res.sendFile(path.join(__dirname, 'public.html')));
-app.get('/privacy', (_req, res) => res.sendFile(path.join(__dirname, 'privacy.html')));
-app.get('/api/public-state', (_req, res) => res.json(publicView()));
-
-// Control panel (auth required).
-app.get('/', requireAuth, (_req, res) => res.sendFile(path.join(__dirname, 'index.html')));
 
 // ---------- Control API (auth required) ----------
 app.get('/api/state', requireAuth, (_req, res) => res.json(queue.snapshot()));
@@ -191,7 +202,7 @@ if (process.env.SIMULATE === 'true') {
 
 server.listen(PORT, () => {
   console.log(`\n  TCG Live Queue running -> http://localhost:${PORT}`);
-  console.log(`  Panel: /  (password protected)  |  Public view: /public  |  Privacy: /privacy`);
+  console.log(`  Public site: /  |  Admin (secret): ${ADMIN}  |  Privacy: /privacy`);
   console.log(`  Mode: ${process.env.SIMULATE === 'true' ? 'SIMULATOR' : 'LIVE'}` +
     ` | TikTok ingest: ${tiktokEnabled() ? 'ON' : 'off'}` +
     ` | Discord: ${discordEnabled() ? 'ON' : 'off'}\n`);
