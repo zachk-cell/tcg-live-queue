@@ -14,6 +14,7 @@ import {
   REST,
   Routes,
   SlashCommandBuilder,
+  PermissionFlagsBits,
 } from 'discord.js';
 
 const MAX_SHOWN = 15; // how many upcoming slots to show in the embed
@@ -26,22 +27,24 @@ function buildQueueMessage(queue) {
   const snap = queue.snapshot();
   const q = snap.queue;
   const lines = [];
-  lines.push(`**🟢 LIVE QUEUE — ${q.length} active slot${q.length === 1 ? '' : 's'}**`);
+  lines.push(`**🟢 LIVE QUEUE — ${q.length} in line**`);
   if (snap.stats.priorityCount) {
-    lines.push(`⭐ ${snap.stats.priorityCount} priority · 💵 $${snap.stats.activeValue.toFixed(2)} in queue`);
+    lines.push(`⭐ ${snap.stats.priorityCount} priority`);
   }
   lines.push('');
   if (!q.length) {
     lines.push('_Queue is empty — waiting on orders._');
   } else {
     for (const e of q.slice(0, MAX_SHOWN)) {
+      // Public-safe: username + position + priority only. No totals, items, or
+      // order counts — matches the public web view.
       const star = e.bumped ? '🔺' : e.isPriority ? '⭐' : '　';
-      const multi = e.orderCount > 1 ? ` _(x${e.orderCount} orders)_` : '';
-      lines.push(`\`${String(e.position).padStart(2)}\` ${star} **${e.buyer}** — ${e.itemCount} item${e.itemCount === 1 ? '' : 's'} · $${e.total.toFixed(2)}${multi}`);
+      lines.push(`\`${String(e.position).padStart(2)}\` ${star} **${e.buyer}**`);
     }
     if (q.length > MAX_SHOWN) lines.push(`_…and ${q.length - MAX_SHOWN} more_`);
   }
   lines.push('');
+  lines.push('_Order totals and personal details are private and never shown here._');
   lines.push(`_Updated <t:${Math.floor(Date.now() / 1000)}:R>_`);
   return lines.join('\n');
 }
@@ -62,10 +65,12 @@ export async function startDiscord(queue) {
     new SlashCommandBuilder()
       .setName('fulfill')
       .setDescription('Mark the top (or a named buyer) slot fulfilled')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
       .addStringOption((o) => o.setName('buyer').setDescription('Buyer name (optional; defaults to top)')),
     new SlashCommandBuilder()
       .setName('bump')
       .setDescription('Bump a buyer to the top')
+      .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
       .addStringOption((o) => o.setName('buyer').setDescription('Buyer name').setRequired(true)),
   ].map((c) => c.toJSON());
 
