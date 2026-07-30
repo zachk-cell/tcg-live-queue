@@ -83,6 +83,8 @@
     <input id="search" placeholder="Filter by buyer…" oninput="render()" />
     <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
     <button class="ghost" onclick="resetQueue()">Reset</button>
+    <a href="/public" target="_blank" style="text-decoration:none"><button class="ghost">Public view ↗</button></a>
+    <a href="/logout" style="text-decoration:none"><button class="ghost">Log out</button></a>
   </div>
 
   <div class="chips" id="pri-chips"></div>
@@ -107,7 +109,7 @@
 </div>
 
 <script>
-  const socket = io();
+  const socket = io('/panel');
   let state = { queue: [], fulfilled: [], stats: {}, config: { priorityItems: [] } };
 
   socket.on('connect', () => document.getElementById('dot').classList.add('live'));
