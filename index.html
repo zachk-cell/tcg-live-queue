@@ -193,13 +193,14 @@
       qEl.innerHTML = q.map(e=>{
         const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
         const cls = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
-        const badges = (e.isPriority?'<span class="badge pri">PRIORITY</span>':'')
-          + (e.orderCount>1?`<span class="badge multi">${e.orderCount} orders</span>`:'');
+        const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
+        const countBadge = `<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
+        const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
         return `<div class="${cls}">
           <div class="pos">${e.position}</div>
           <div class="who">
-            <div class="name">${esc(e.buyer)} ${badges}</div>
-            <div class="items"><span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span> ${esc(itemStr)}</div>
+            <div class="name">${esc(e.buyer)} ${priBadge} ${ordNos} ${countBadge}</div>
+            <div class="items">${esc(itemStr)}</div>
           </div>
           <div class="money">${money(e.total)}</div>
           <div class="actions">
