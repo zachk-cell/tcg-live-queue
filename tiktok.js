@@ -151,6 +151,9 @@ export async function debugShops() {
       accessExpireAt: tokens.accessExpireAt,
       sellerName: tokens.sellerName,
       shopId: tokens.shopId,
+      shopCipher: tokens.shopCipher,
+      // Admin-only: needed to seed TIKTOK_REFRESH_TOKEN in env for durable reconnect.
+      refreshToken: tokens.refreshToken,
     },
     apiBase: API_BASE,
     apiVersion: API_VERSION,
