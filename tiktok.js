@@ -1,116 +1,143 @@
-// TikTok Shop ingest.
+// TikTok Shop integration.
 //
-// Two parts:
-//   1. mountWebhook(app, queue) — an HTTP endpoint TikTok Shop calls when an
-//      order changes. We verify the signature, then fetch full order detail
-//      and push it into the queue.
-//   2. fetchOrderDetail(orderId) — calls the TikTok Shop Order Detail API.
+// - OAuth token management: exchange auth_code -> access/refresh tokens,
+//   auto-refresh before/when they expire, persist to disk within a session.
+// - Order ingest by POLLING: while the seller is live, poll for recently
+//   created orders every few seconds and push them into the queue. Polling is
+//   simpler and more reliable on ephemeral/free hosting than inbound webhooks,
+//   and it naturally respects the "only while live" rule.
 //
-// This is written against TikTok Shop's documented Open API (Partner Center).
-// It stays DORMANT until you set the TikTok env vars (see .env.example) and
-// TIKTOK_ENABLED=true. Until then the app runs on the simulator so you can
-// see everything working before your Partner Center app is approved.
-//
-// Docs:
-//   Auth:        https://partner.tiktokshop.com/docv2/page/authorization-overview-202407
-//   Webhooks:    https://partner.tiktokshop.com/docv2/page/tts-webhooks-overview
-//   Order status change event & Get Order Detail API — Partner Center Order docs.
+// Endpoints (TikTok Shop Open API):
+//   Auth:   https://auth.tiktok-shops.com/api/v2/token/get   (grant_type=authorized_code)
+//           https://auth.tiktok-shops.com/api/v2/token/refresh (grant_type=refresh_token)
+//   API:    https://open-api.tiktokglobalshop.com  (signed requests)
 
 import crypto from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
 
-const {
-  TIKTOK_APP_KEY,
-  TIKTOK_APP_SECRET,
-  TIKTOK_SHOP_CIPHER,
-  TIKTOK_ACCESS_TOKEN,
-  TIKTOK_API_BASE = 'https://open-api.tiktokglobalshop.com',
-  TIKTOK_API_VERSION = '202309',
-} = process.env;
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const TOKEN_FILE = path.join(DATA_DIR, 'tiktok-tokens.json');
 
-export const tiktokEnabled = () => process.env.TIKTOK_ENABLED === 'true';
+const AUTH_BASE = process.env.TIKTOK_AUTH_BASE || 'https://auth.tiktok-shops.com';
+const API_BASE = process.env.TIKTOK_API_BASE || 'https://open-api.tiktokglobalshop.com';
+const API_VERSION = process.env.TIKTOK_API_VERSION || '202309';
+const APP_KEY = process.env.TIKTOK_APP_KEY || '';
+const APP_SECRET = process.env.TIKTOK_APP_SECRET || '';
 
-/**
- * Verify the webhook came from TikTok. TikTok signs the request; the signature
- * is HMAC-SHA256 of (app_key + rawBody) keyed by app_secret. We compare against
- * the Authorization / x-tts-signature header. If secrets aren't set we skip
- * (dev only) and log loudly.
- */
-function verifySignature(req, rawBody) {
-  const provided =
-    req.headers['authorization'] || req.headers['x-tts-signature'] || '';
-  if (!TIKTOK_APP_SECRET || !TIKTOK_APP_KEY) {
-    console.warn('[tiktok] signature check skipped — secrets not set');
-    return true;
-  }
-  const base = TIKTOK_APP_KEY + rawBody;
-  const digest = crypto
-    .createHmac('sha256', TIKTOK_APP_SECRET)
-    .update(base)
-    .digest('hex');
-  // Constant-time compare when lengths match.
+// Token state — seeded from env, overlaid by persisted file, updated at runtime.
+let tokens = {
+  accessToken: process.env.TIKTOK_ACCESS_TOKEN || '',
+  refreshToken: process.env.TIKTOK_REFRESH_TOKEN || '',
+  shopCipher: process.env.TIKTOK_SHOP_CIPHER || '',
+  shopId: process.env.TIKTOK_SHOP_ID || '',
+  sellerName: '',
+  accessExpireAt: 0,
+  lastError: '',
+};
+
+export function tiktokEnabled() {
+  return process.env.TIKTOK_ENABLED === 'true' && !!APP_KEY && !!APP_SECRET;
+}
+
+function persist() {
   try {
-    return (
-      provided.length === digest.length &&
-      crypto.timingSafeEqual(Buffer.from(provided), Buffer.from(digest))
-    );
-  } catch {
-    return false;
-  }
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+    fs.writeFileSync(TOKEN_FILE, JSON.stringify(tokens));
+  } catch (e) { console.warn('[tiktok] token persist failed:', e.message); }
+}
+(function loadPersisted() {
+  try {
+    if (fs.existsSync(TOKEN_FILE)) tokens = { ...tokens, ...JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8')) };
+  } catch { /* ignore */ }
+})();
+
+// ---------------- Token endpoints ----------------
+function applyTokenData(d) {
+  if (!d) return;
+  if (d.access_token) tokens.accessToken = d.access_token;
+  if (d.refresh_token) tokens.refreshToken = d.refresh_token;
+  if (d.access_token_expire_in) tokens.accessExpireAt = Date.now() + d.access_token_expire_in * 1000 - 60000;
+  if (d.seller_name) tokens.sellerName = d.seller_name;
+  tokens.lastError = '';
+  persist();
 }
 
-/** Sign an outbound API request per TikTok Shop's rule (sorted params + path). */
-function signRequest(pathName, params) {
-  const sorted = Object.keys(params)
-    .filter((k) => k !== 'sign' && k !== 'access_token')
-    .sort()
-    .map((k) => `${k}${params[k]}`)
-    .join('');
-  const base = `${pathName}${sorted}`;
-  const withSecret = TIKTOK_APP_SECRET + base + TIKTOK_APP_SECRET;
-  return crypto
-    .createHmac('sha256', TIKTOK_APP_SECRET)
-    .update(withSecret)
-    .digest('hex');
+async function tokenGet(authCode) {
+  const url = `${AUTH_BASE}/api/v2/token/get?app_key=${APP_KEY}&app_secret=${APP_SECRET}` +
+    `&auth_code=${encodeURIComponent(authCode)}&grant_type=authorized_code`;
+  const res = await fetch(url);
+  const body = await res.json().catch(() => ({}));
+  if (body.code !== 0) throw new Error('token/get: ' + (body.message || JSON.stringify(body)));
+  applyTokenData(body.data);
+  return body.data;
 }
 
-/** Call Get Order Detail and normalise into our queue's order shape. */
-export async function fetchOrderDetail(orderId) {
-  if (!tiktokEnabled()) return null;
-  const pathName = `/order/${TIKTOK_API_VERSION}/orders`;
+async function tokenRefresh() {
+  if (!tokens.refreshToken) throw new Error('no refresh token');
+  const url = `${AUTH_BASE}/api/v2/token/refresh?app_key=${APP_KEY}&app_secret=${APP_SECRET}` +
+    `&refresh_token=${encodeURIComponent(tokens.refreshToken)}&grant_type=refresh_token`;
+  const res = await fetch(url);
+  const body = await res.json().catch(() => ({}));
+  if (body.code !== 0) throw new Error('token/refresh: ' + (body.message || JSON.stringify(body)));
+  applyTokenData(body.data);
+  console.log('[tiktok] access token refreshed');
+  return body.data;
+}
+
+// ---------------- Signed API calls ----------------
+function sign(pathName, params, body = '') {
+  const keys = Object.keys(params).filter((k) => k !== 'sign' && k !== 'access_token').sort();
+  let base = pathName;
+  for (const k of keys) base += k + params[k];
+  base += body || '';
+  base = APP_SECRET + base + APP_SECRET;
+  return crypto.createHmac('sha256', APP_SECRET).update(base).digest('hex');
+}
+
+async function apiCall(method, pathName, extraParams = {}, jsonBody = null, retry = true) {
   const params = {
-    app_key: TIKTOK_APP_KEY,
-    shop_cipher: TIKTOK_SHOP_CIPHER,
-    timestamp: Math.floor(Date.now() / 1000),
-    ids: orderId,
+    app_key: APP_KEY,
+    timestamp: String(Math.floor(Date.now() / 1000)),
+    ...(tokens.shopCipher ? { shop_cipher: tokens.shopCipher } : {}),
+    ...extraParams,
   };
-  params.sign = signRequest(pathName, params);
+  const bodyStr = jsonBody ? JSON.stringify(jsonBody) : '';
+  params.sign = sign(pathName, params, bodyStr);
   const qs = new URLSearchParams(params).toString();
-  const url = `${TIKTOK_API_BASE}${pathName}?${qs}`;
-
-  const res = await fetch(url, {
-    headers: {
-      'x-tts-access-token': TIKTOK_ACCESS_TOKEN,
-      'content-type': 'application/json',
-    },
+  const res = await fetch(`${API_BASE}${pathName}?${qs}`, {
+    method,
+    headers: { 'x-tts-access-token': tokens.accessToken, 'content-type': 'application/json' },
+    ...(jsonBody ? { body: bodyStr } : {}),
   });
-  if (!res.ok) {
-    console.error('[tiktok] order detail HTTP', res.status, await res.text());
-    return null;
+  const body = await res.json().catch(() => ({}));
+  // Refresh + retry once on any token-related error.
+  if (retry && tokens.refreshToken && body && body.code && /token|auth|expire/i.test(JSON.stringify(body))) {
+    try { await tokenRefresh(); } catch (e) { tokens.lastError = e.message; persist(); return body; }
+    return apiCall(method, pathName, extraParams, jsonBody, false);
   }
-  const body = await res.json();
-  const order = body?.data?.orders?.[0];
-  if (!order) {
-    console.error('[tiktok] no order in response', JSON.stringify(body).slice(0, 300));
-    return null;
-  }
-  return normalizeOrder(order);
+  return body;
 }
 
-/** Map TikTok's order object onto our internal shape. */
+async function getShopCipher() {
+  const pathName = `/authorization/${API_VERSION}/shops`;
+  const body = await apiCall('GET', pathName);
+  const shop = body?.data?.shops?.[0];
+  if (shop) {
+    tokens.shopCipher = shop.cipher;
+    tokens.shopId = shop.id;
+    if (shop.name) tokens.sellerName = tokens.sellerName || shop.name;
+    persist();
+  }
+  return shop;
+}
+
+// ---------------- Orders ----------------
 export function normalizeOrder(o) {
   const lineItems = o.line_items || o.item_list || [];
   const items = lineItems.map((li) => ({
     name: li.product_name || li.sku_name || 'Item',
+    sku: li.seller_sku || li.sku_id || '',
     qty: li.quantity || 1,
   }));
   return {
@@ -119,72 +146,99 @@ export function normalizeOrder(o) {
     buyer: o.buyer_username || o.recipient_address?.name || o.buyer_uid || 'Buyer',
     items,
     total: Number(o.payment?.total_amount || o.total_amount || 0),
-    createdAt: (o.create_time ? o.create_time * 1000 : Date.now()),
+    createdAt: o.create_time ? o.create_time * 1000 : Date.now(),
   };
 }
 
-/**
- * Mount the webhook receiver. TikTok POSTs a small event telling us WHICH order
- * changed and its new status; we only enqueue orders that are paid/awaiting
- * shipment (i.e. real, actionable orders for the live), then fetch full detail.
- */
-export function mountWebhook(app, queue) {
-  // We need the raw body for signature verification.
-  app.post(
-    '/webhook/tiktok',
-    (req, res, next) => {
-      let data = '';
-      req.setEncoding('utf8');
-      req.on('data', (c) => (data += c));
-      req.on('end', () => {
-        req.rawBody = data;
-        try {
-          req.body = data ? JSON.parse(data) : {};
-        } catch {
-          req.body = {};
-        }
-        next();
-      });
-    },
-    async (req, res) => {
-      if (!verifySignature(req, req.rawBody || '')) {
-        console.warn('[tiktok] bad webhook signature — rejected');
-        return res.status(401).send('bad signature');
+async function fetchOrderDetail(orderId) {
+  const body = await apiCall('GET', `/order/${API_VERSION}/orders`, { ids: orderId });
+  const order = body?.data?.orders?.[0];
+  if (!order) { console.warn('[tiktok] order detail empty for', orderId, JSON.stringify(body).slice(0, 200)); return null; }
+  return normalizeOrder(order);
+}
+
+// Search for order IDs created since `sinceEpoch` (actionable statuses only).
+async function searchRecentOrderIds(sinceEpoch) {
+  const pathName = `/order/${API_VERSION}/orders/search`;
+  const ids = [];
+  let pageToken = '';
+  for (let page = 0; page < 5; page++) {
+    const extra = { page_size: 50, ...(pageToken ? { page_token: pageToken } : {}) };
+    const bodyReq = { create_time_ge: sinceEpoch, order_status: 'AWAITING_SHIPMENT' };
+    const body = await apiCall('POST', pathName, extra, bodyReq);
+    const orders = body?.data?.orders || [];
+    for (const o of orders) ids.push(o.id || o.order_id);
+    pageToken = body?.data?.next_page_token || '';
+    if (!pageToken) break;
+  }
+  return ids;
+}
+
+// ---------------- Poller ----------------
+export function startPolling(queue) {
+  const interval = Number(process.env.TIKTOK_POLL_MS) || 10000;
+  let sinceEpoch = Math.floor(Date.now() / 1000);
+  const seen = new Set();
+
+  // Each new live starts a fresh window: only orders placed after Go Live count.
+  queue.on('change', (e) => {
+    if (e && e.reason === 'go-live') { sinceEpoch = Math.floor(Date.now() / 1000); seen.clear(); }
+  });
+
+  async function poll() {
+    if (!tiktokEnabled() || !queue.live || !tokens.accessToken || !tokens.shopCipher) return;
+    try {
+      const ids = await searchRecentOrderIds(sinceEpoch - 30); // small overlap for safety
+      for (const id of ids) {
+        if (!id || seen.has(id)) continue;
+        const detail = await fetchOrderDetail(id);
+        if (detail) { seen.add(id); queue.upsertOrder(detail); }
       }
-      // Ack fast; TikTok retries on non-2xx, so never block the response.
-      res.status(200).send('ok');
+    } catch (e) { console.error('[tiktok] poll error:', e.message); }
+  }
+  const timer = setInterval(poll, interval);
+  timer.unref?.();
+  console.log(`[tiktok] polling every ${interval}ms while live`);
+}
 
-      try {
-        const evt = req.body || {};
-        // Event shape (order status change): { type, shop_id, data: { order_id, order_status } }
-        const type = evt.type || evt.event_type;
-        const orderId = evt.data?.order_id || evt.data?.orderId;
-        const status = evt.data?.order_status || evt.data?.status;
-        if (!orderId) return;
-
-        // Only queue actionable orders. Adjust this set to taste.
-        const ACTIONABLE = new Set([
-          'AWAITING_SHIPMENT',
-          'AWAITING_COLLECTION',
-          'PAID',
-          100, 111, 112,
-        ]);
-        const detail = await fetchOrderDetail(orderId);
-        if (!detail) return;
-
-        if (status && !ACTIONABLE.has(status)) {
-          // Terminal / non-actionable states auto-clear from active queue.
-          if (['COMPLETED', 'DELIVERED', 'CANCELLED', 130, 140].includes(status)) {
-            queue.markFulfilled(orderId);
-            return;
-          }
-        }
-        queue.upsertOrder(detail);
-      } catch (e) {
-        console.error('[tiktok] webhook handling error:', e.message);
-      }
+// ---------------- Auth routes ----------------
+export function mountAuth(app, adminPath) {
+  // TikTok redirects here (Redirect URL) with an auth code after the seller approves.
+  app.get('/auth/tiktok/callback', async (req, res) => {
+    const code = req.query.code || req.query.auth_code;
+    if (!code) return res.status(400).send('Missing authorization code.');
+    try {
+      await tokenGet(code);
+      await getShopCipher();
+      res.redirect((adminPath || '/') + '?tiktok=connected');
+    } catch (e) {
+      console.error('[tiktok] auth callback error:', e.message);
+      res.status(500).send('TikTok authorization failed: ' + e.message + ' — you can close this and try again.');
     }
-  );
+  });
+}
 
-  console.log('[tiktok] webhook mounted at POST /webhook/tiktok');
+export function tiktokStatus() {
+  return {
+    enabled: tiktokEnabled(),
+    connected: !!(tokens.accessToken && tokens.shopCipher),
+    shop: tokens.sellerName || tokens.shopId || '',
+    lastError: tokens.lastError || '',
+    authUrl: process.env.TIKTOK_AUTH_URL || '',
+  };
+}
+
+// On boot: if enabled and we have a refresh token but no/expired access token, refresh.
+export async function tiktokBoot() {
+  if (!tiktokEnabled()) { console.log('[tiktok] ingest disabled'); return; }
+  try {
+    if (tokens.refreshToken && (!tokens.accessToken || Date.now() > tokens.accessExpireAt)) {
+      await tokenRefresh();
+    }
+    if (tokens.accessToken && !tokens.shopCipher) await getShopCipher();
+  } catch (e) {
+    tokens.lastError = e.message; persist();
+    console.warn('[tiktok] boot token setup failed:', e.message);
+  }
+  console.log('[tiktok] status:', JSON.stringify(tiktokStatus()));
 }

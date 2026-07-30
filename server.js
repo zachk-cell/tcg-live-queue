@@ -17,7 +17,7 @@ import { Server as IOServer } from 'socket.io';
 import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
-import { mountWebhook, tiktokEnabled } from './tiktok.js';
+import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus } from './tiktok.js';
 import { startDiscord, discordEnabled } from './discord.js';
 import { startSimulator } from './simulator.js';
 
@@ -78,9 +78,6 @@ const queue = new QueueEngine();
 const app = express();
 const server = http.createServer(app);
 const io = new IOServer(server);
-
-// TikTok webhook needs the raw body, so mount it BEFORE any body parser.
-mountWebhook(app, queue);
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -217,6 +214,10 @@ app.get('/api/export/:id', requireAuth, (req, res) => {
   sendCsv(res, `fulfilled-${req.params.id}.csv`, s.fulfilled || []);
 });
 
+// ---------- TikTok Shop ingest ----------
+mountAuth(app, ADMIN); // /auth/tiktok/callback (Redirect URL target)
+app.get('/api/tiktok-status', requireAuth, (_req, res) => res.json(tiktokStatus()));
+
 // ---------- Real-time: two namespaces ----------
 const panelNs = io.of('/panel');
 panelNs.use((socket, next) => {
@@ -241,6 +242,11 @@ if (process.env.SIMULATE === 'true') {
   if (!queue.priorityItems.length) queue.setPriorityItems(['break', 'slab']);
   queue.live = true; // demo starts "live" so the simulated queue populates
   startSimulator(queue, { intervalMs: Number(process.env.SIM_INTERVAL_MS) || 2500 });
+}
+// Real TikTok order ingest (polls while live). Runs alongside/instead of the sim.
+if (tiktokEnabled()) {
+  tiktokBoot().catch((e) => console.error('[tiktok] boot error:', e.message));
+  startPolling(queue);
 }
 
 server.listen(PORT, () => {

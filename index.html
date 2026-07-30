@@ -72,6 +72,10 @@
   .livebadge{font-size:10px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:20px;
     background:#3a2020;color:#ff8b8b;vertical-align:middle;margin-left:6px}
   .livebadge.on{background:#12331f;color:#43e08a;box-shadow:0 0 8px rgba(67,224,138,.4)}
+  .ttbadge{font-size:10px;font-weight:800;letter-spacing:.4px;padding:3px 8px;border-radius:20px;vertical-align:middle;margin-left:4px}
+  .ttbadge.ok{background:#0e2a44;color:#6fb3ff}
+  .ttbadge.bad{background:#3a2020;color:#ff8b8b}
+  .tt-banner a{color:#ffd7d7;font-weight:700}
   button.livebtn{background:var(--done);border-color:var(--done);color:#04180d;font-weight:800}
   button.livebtn.off{background:#c23b3b;border-color:#c23b3b;color:#fff}
   .offline-banner{background:#2a1a1a;border:1px solid #5a2a2a;color:#ffb3b3;border-radius:11px;
@@ -81,7 +85,7 @@
 </head>
 <body>
 <header>
-  <h1><span id="dot" class="dot"></span>TCG Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span></h1>
+  <h1><span id="dot" class="dot"></span>TCG Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span> <span id="ttStatus" class="ttbadge" style="display:none"></span></h1>
   <div class="stats">
     <div class="stat"><b id="s-active">0</b><span>In queue</span></div>
     <div class="stat"><b id="s-pri">0</b><span>Priority</span></div>
@@ -106,6 +110,8 @@
   <div id="offline-banner" class="offline-banner" style="display:none">
     ⚫ You're <b>offline</b> — new orders are being ignored and won't enter the queue. Hit <b>Go Live</b> to start a fresh queue and begin accepting orders.
   </div>
+
+  <div id="tt-banner" class="offline-banner" style="display:none"></div>
 
   <div class="sectitle">Active queue — top is next</div>
   <div id="queue"></div>
@@ -261,6 +267,33 @@
   }
 
   render();
+
+  // --- TikTok connection status ---
+  async function refreshTikTok(){
+    let s; try { s = await (await fetch('/api/tiktok-status')).json(); } catch { return; }
+    const badge = document.getElementById('ttStatus');
+    const banner = document.getElementById('tt-banner');
+    if(!s.enabled){ badge.style.display='none'; banner.style.display='none'; return; }
+    badge.style.display='';
+    if(s.connected){
+      badge.className='ttbadge ok';
+      badge.textContent = 'TikTok ✓' + (s.shop ? ' '+s.shop : '');
+      banner.style.display='none';
+    } else {
+      badge.className='ttbadge bad';
+      badge.textContent = 'TikTok ⚠ not connected';
+      banner.className='offline-banner tt-banner';
+      banner.style.display='block';
+      banner.innerHTML = '⚠ <b>TikTok isn\'t connected right now</b>, so live orders won\'t come in.'
+        + (s.authUrl ? ' <a href="'+s.authUrl+'" target="_blank">Reconnect your shop →</a>' : ' Reconnect it from the authorization link.')
+        + (s.lastError ? '<br><span style="opacity:.7;font-size:12px">('+esc(s.lastError)+')</span>' : '');
+    }
+  }
+  if(new URLSearchParams(location.search).get('tiktok')==='connected'){
+    history.replaceState({}, '', location.pathname);
+  }
+  refreshTikTok();
+  setInterval(refreshTikTok, 30000);
 </script>
 </body>
 </html>
