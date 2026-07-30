@@ -42,8 +42,11 @@
   .pos{font-variant-numeric:tabular-nums;font-weight:800;font-size:18px;width:34px;text-align:center;color:var(--muted)}
   .slot.priority .pos{color:var(--pri)}
   .who{flex:1;min-width:0}
-  .who .name{font-weight:700;font-size:15px;display:flex;align-items:center;gap:7px}
-  .badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;letter-spacing:.4px}
+  .who .name{font-weight:700;font-size:15px;display:flex;align-items:center;gap:7px;
+    min-width:0;overflow:hidden;white-space:nowrap}
+  .who .name .ordno{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:0}
+  .badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;letter-spacing:.4px;
+    white-space:nowrap;flex:none}
   .badge.pri{background:var(--pri);color:#2a1e00}
   .badge.multi{background:#31384a;color:#cdd4e4}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
