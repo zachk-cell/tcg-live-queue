@@ -260,7 +260,7 @@ if (tiktokEnabled()) {
 }
 
 server.listen(PORT, () => {
-  console.log(`\n  TCG Live Queue running -> http://localhost:${PORT}`);
+  console.log(`\n  PBCC Live Queue running -> http://localhost:${PORT}`);
   console.log(`  Public site: /  |  Admin (secret): ${ADMIN}  |  Privacy: /privacy`);
   console.log(`  Mode: ${process.env.SIMULATE === 'true' ? 'SIMULATOR' : 'LIVE'}` +
     ` | TikTok ingest: ${tiktokEnabled() ? 'ON' : 'off'}` +
