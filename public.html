@@ -56,11 +56,21 @@
   function render(){
     const q = state.queue || [];
     const st = state.stats || {};
+    const live = state.live !== false; // treat missing as live for safety
+    const findBox = document.getElementById('find');
+    const el = document.getElementById('list');
+
+    if(!live){
+      document.getElementById('sub').textContent = 'Offline — no live running right now';
+      findBox.style.display = 'none';
+      el.innerHTML = '<div class="empty">🔴 The live isn\'t running right now, so the queue is closed.<br><br>Check back during the next live!</div>';
+      return;
+    }
+    findBox.style.display = '';
     document.getElementById('sub').textContent = q.length
       ? `${st.activeCount} in line${st.priorityCount ? ` · ${st.priorityCount} priority` : ''}`
       : 'Queue is empty right now.';
-    const me = (document.getElementById('find').value || '').toLowerCase();
-    const el = document.getElementById('list');
+    const me = (findBox.value || '').toLowerCase();
     if(!q.length){ el.innerHTML = '<div class="empty">No orders in the queue yet.</div>'; return; }
     el.innerHTML = q.map(e=>{
       const mine = me && e.buyer.toLowerCase().includes(me);

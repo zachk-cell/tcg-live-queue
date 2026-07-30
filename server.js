@@ -116,15 +116,20 @@ function requireAuth(req, res, next) {
 }
 
 // ---------- Public (sanitized) view of the queue ----------
+// Buyers only see the queue while the seller is live. When not live the public
+// page shows "closed" (the admin panel still shows the queue for fulfillment).
 function publicView() {
   const snap = queue.snapshot();
+  const live = snap.stats.live;
   return {
-    queue: snap.queue.map((e) => ({
-      position: e.position,
-      buyer: e.buyer,
-      isPriority: e.isPriority,
-    })),
-    stats: { activeCount: snap.stats.activeCount, priorityCount: snap.stats.priorityCount },
+    live,
+    queue: live
+      ? snap.queue.map((e) => ({ position: e.position, buyer: e.buyer, isPriority: e.isPriority }))
+      : [],
+    stats: {
+      activeCount: live ? snap.stats.activeCount : 0,
+      priorityCount: live ? snap.stats.priorityCount : 0,
+    },
   };
 }
 
@@ -175,6 +180,39 @@ app.post('/api/priority-items', requireAuth, (req, res) => {
 });
 app.post('/api/reset', requireAuth, (_req, res) => { queue.reset(); res.json({ ok: true }); });
 
+// Live session control: going live clears the previous queue and starts accepting
+// orders; ending keeps the current queue for fulfillment but stops new orders.
+app.post('/api/live/on', requireAuth, (_req, res) => { queue.goLive(); res.json({ ok: true, live: true }); });
+app.post('/api/live/off', requireAuth, (_req, res) => { queue.endLive(); res.json({ ok: true, live: false }); });
+
+// ---------- Fulfilled export (CSV) + stream history (admin only) ----------
+function toCsv(records) {
+  const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  const header = ['Order #', 'Buyer', 'Items', 'Total qty', 'Order total', 'Fulfilled at'];
+  const lines = [header.map(esc).join(',')];
+  for (const r of records) {
+    const items = (r.items || []).map((i) => `${i.qty}x ${i.name}`).join('; ');
+    const qty = (r.items || []).reduce((n, i) => n + (i.qty || 1), 0);
+    const when = r.fulfilledAt ? new Date(r.fulfilledAt).toISOString() : '';
+    lines.push([r.orderId, r.buyer, items, qty, Number(r.total || 0).toFixed(2), when].map(esc).join(','));
+  }
+  return lines.join('\r\n');
+}
+function sendCsv(res, filename, records) {
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+  res.send(toCsv(records));
+}
+// Current stream's fulfilled orders.
+app.get('/api/export', requireAuth, (_req, res) =>
+  sendCsv(res, 'fulfilled-current.csv', queue.fulfilledRecords()));
+// A past stream by id.
+app.get('/api/export/:id', requireAuth, (req, res) => {
+  const s = queue.history.find((h) => String(h.id) === req.params.id);
+  if (!s) return res.status(404).send('stream not found');
+  sendCsv(res, `fulfilled-${req.params.id}.csv`, s.fulfilled || []);
+});
+
 // ---------- Real-time: two namespaces ----------
 const panelNs = io.of('/panel');
 panelNs.use((socket, next) => {
@@ -197,6 +235,7 @@ if (discordEnabled()) {
 }
 if (process.env.SIMULATE === 'true') {
   if (!queue.priorityItems.length) queue.setPriorityItems(['break', 'slab']);
+  queue.live = true; // demo starts "live" so the simulated queue populates
   startSimulator(queue, { intervalMs: Number(process.env.SIM_INTERVAL_MS) || 2500 });
 }
 

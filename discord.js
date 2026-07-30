@@ -25,6 +25,10 @@ export function discordEnabled() {
 
 function buildQueueMessage(queue) {
   const snap = queue.snapshot();
+  if (!snap.stats.live) {
+    return '**🔴 Queue closed**\n_The live isn\'t running right now. The queue reopens when the next live starts._\n' +
+      `_Updated <t:${Math.floor(Date.now() / 1000)}:R>_`;
+  }
   const q = snap.queue;
   const lines = [];
   lines.push(`**🟢 LIVE QUEUE — ${q.length} in line**`);

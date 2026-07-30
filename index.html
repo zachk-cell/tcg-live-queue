@@ -65,11 +65,19 @@
   .row{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
   .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
   .chip{background:var(--pri-bg);color:var(--pri);border:1px solid var(--pri);border-radius:20px;padding:3px 10px;font-size:12px}
+  .livebadge{font-size:10px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:20px;
+    background:#3a2020;color:#ff8b8b;vertical-align:middle;margin-left:6px}
+  .livebadge.on{background:#12331f;color:#43e08a;box-shadow:0 0 8px rgba(67,224,138,.4)}
+  button.livebtn{background:var(--done);border-color:var(--done);color:#04180d;font-weight:800}
+  button.livebtn.off{background:#c23b3b;border-color:#c23b3b;color:#fff}
+  .offline-banner{background:#2a1a1a;border:1px solid #5a2a2a;color:#ffb3b3;border-radius:11px;
+    padding:11px 14px;margin:6px 0 14px;font-size:13px}
+  .ordno{color:#748099;font-variant-numeric:tabular-nums;font-size:11.5px;margin-right:6px}
 </style>
 </head>
 <body>
 <header>
-  <h1><span id="dot" class="dot"></span>TCG Live Queue</h1>
+  <h1><span id="dot" class="dot"></span>TCG Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span></h1>
   <div class="stats">
     <div class="stat"><b id="s-active">0</b><span>In queue</span></div>
     <div class="stat"><b id="s-pri">0</b><span>Priority</span></div>
@@ -80,6 +88,7 @@
 
 <main>
   <div class="toolbar">
+    <button id="liveBtn" class="livebtn" onclick="toggleLive()">● Go Live</button>
     <input id="search" placeholder="Filter by buyer…" oninput="render()" />
     <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
     <button class="ghost" onclick="resetQueue()">Reset</button>
@@ -89,11 +98,21 @@
 
   <div class="chips" id="pri-chips"></div>
 
+  <div id="offline-banner" class="offline-banner" style="display:none">
+    ⚫ You're <b>offline</b> — new orders are being ignored and won't enter the queue. Hit <b>Go Live</b> to start a fresh queue and begin accepting orders.
+  </div>
+
   <div class="sectitle">Active queue — top is next</div>
   <div id="queue"></div>
 
-  <div class="sectitle">Recently fulfilled</div>
+  <div class="sectitle" style="display:flex;align-items:center;gap:10px">
+    <span>Fulfilled this stream</span>
+    <a href="/api/export" style="text-decoration:none;margin-left:auto"><button class="ghost">⬇ Export CSV</button></a>
+  </div>
   <div id="fulfilled"></div>
+
+  <div class="sectitle">Past streams — admin history</div>
+  <div id="history"></div>
 </main>
 
 <div class="modal" id="modal">
@@ -122,6 +141,16 @@
   async function post(url){ await fetch(url,{method:'POST'}); }
   function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
   function bump(key){ post('/api/bump/'+encodeURIComponent(key)); }
+  async function toggleLive(){
+    const live = (state.stats||{}).live;
+    if(!live){
+      if(!confirm('Start a new live?\n\nThis CLEARS the current queue and begins accepting orders.')) return;
+      await post('/api/live/on');
+    } else {
+      if(!confirm('End the live?\n\nNew orders will stop being added. The current queue stays so you can finish fulfilling it.')) return;
+      await post('/api/live/off');
+    }
+  }
   async function resetQueue(){
     if(confirm('Clear the entire active + fulfilled queue? (Priority item settings are kept.)'))
       await post('/api/reset');
@@ -140,6 +169,15 @@
 
   function render(){
     const st = state.stats||{};
+    const live = !!st.live;
+    const badge = document.getElementById('liveBadge');
+    badge.textContent = live ? 'LIVE' : 'OFFLINE';
+    badge.classList.toggle('on', live);
+    const lb = document.getElementById('liveBtn');
+    lb.textContent = live ? '■ End Live' : '● Go Live';
+    lb.classList.toggle('off', !live);
+    document.getElementById('offline-banner').style.display = live ? 'none' : 'block';
+
     document.getElementById('s-active').textContent = st.activeCount||0;
     document.getElementById('s-pri').textContent = st.priorityCount||0;
     document.getElementById('s-val').textContent = money(st.activeValue);
@@ -163,7 +201,7 @@
           <div class="pos">${e.position}</div>
           <div class="who">
             <div class="name">${esc(e.buyer)} ${badges}</div>
-            <div class="items">${esc(itemStr)}</div>
+            <div class="items"><span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span> ${esc(itemStr)}</div>
           </div>
           <div class="money">${money(e.total)}</div>
           <div class="actions">
@@ -177,10 +215,22 @@
     const fEl = document.getElementById('fulfilled');
     const f = state.fulfilled||[];
     fEl.innerHTML = f.length ? f.map(s=>`<div class="done-row">
+        <span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span>
         <span class="name">${esc(s.buyer)}</span>
         <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
         <span style="margin-left:auto">${money(s.total)}</span>
-      </div>`).join('') : '<div class="empty">Nothing fulfilled yet.</div>';
+      </div>`).join('') : '<div class="empty">Nothing fulfilled yet this stream.</div>';
+
+    const hEl = document.getElementById('history');
+    const h = state.history||[];
+    hEl.innerHTML = h.length ? h.map(s=>{
+      const label = new Date(s.endedAt).toLocaleString([], {month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+      return `<div class="done-row">
+        <span class="name">Stream ending ${label}</span>
+        <span>${s.count} order${s.count===1?'':'s'} · ${money(s.value)}</span>
+        <a href="/api/export/${encodeURIComponent(s.id)}" style="text-decoration:none;margin-left:auto"><button class="ghost">⬇ Export</button></a>
+      </div>`;
+    }).join('') : '<div class="empty">No past streams yet — history fills in each time you start a new live.</div>';
   }
 
   render();

@@ -19,6 +19,8 @@ import { EventEmitter } from 'node:events';
 const DATA_DIR = path.resolve(process.cwd(), 'data');
 const STATE_FILE = path.join(DATA_DIR, 'queue-state.json');
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const MAX_HISTORY = 5; // keep the last N streams for the admin history view
 
 /**
  * Order record:
@@ -38,6 +40,9 @@ export class QueueEngine extends EventEmitter {
     this.openBatch = new Map(); // buyerId -> current open batchKey (or absent)
     this.batchCounter = 0;
     this.priorityItems = []; // array of lowercased substrings that trigger priority
+    this.live = false; // when false, incoming orders are ignored (not queued)
+    this.sessionStartedAt = null; // when the current live started
+    this.history = []; // archived past streams (most recent first)
     this._ensureDataDir();
     this._load();
   }
@@ -52,9 +57,18 @@ export class QueueEngine extends EventEmitter {
         const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
         this.priorityItems = (cfg.priorityItems || []).map((s) => s.toLowerCase());
         this.batchCounter = cfg.batchCounter || 0;
+        this.live = !!cfg.live;
+        this.sessionStartedAt = cfg.sessionStartedAt || null;
       }
     } catch (e) {
       console.warn('[queue] could not load config:', e.message);
+    }
+    try {
+      if (fs.existsSync(HISTORY_FILE)) {
+        this.history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) || [];
+      }
+    } catch (e) {
+      console.warn('[queue] could not load history:', e.message);
     }
     try {
       if (fs.existsSync(STATE_FILE)) {
@@ -76,11 +90,38 @@ export class QueueEngine extends EventEmitter {
       fs.writeFileSync(STATE_FILE, JSON.stringify([...this.orders.values()]));
       fs.writeFileSync(
         CONFIG_FILE,
-        JSON.stringify({ priorityItems: this.priorityItems, batchCounter: this.batchCounter })
+        JSON.stringify({
+          priorityItems: this.priorityItems,
+          batchCounter: this.batchCounter,
+          live: this.live,
+          sessionStartedAt: this.sessionStartedAt,
+        })
       );
     } catch (e) {
       console.warn('[queue] persist failed:', e.message);
     }
+  }
+
+  _persistHistory() {
+    try {
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(this.history));
+    } catch (e) {
+      console.warn('[queue] history persist failed:', e.message);
+    }
+  }
+
+  /** Detailed per-order records of everything fulfilled this session. */
+  fulfilledRecords() {
+    return [...this.orders.values()]
+      .filter((o) => o.status === 'fulfilled')
+      .sort((a, b) => (b.fulfilledAt || 0) - (a.fulfilledAt || 0))
+      .map((o) => ({
+        orderId: o.id,
+        buyer: o.buyer,
+        items: o.items,
+        total: o.total,
+        fulfilledAt: o.fulfilledAt,
+      }));
   }
 
   _isPriorityOrder(items) {
@@ -96,6 +137,9 @@ export class QueueEngine extends EventEmitter {
   upsertOrder(raw) {
     const id = String(raw.id);
     if (this.orders.has(id)) return this.orders.get(id); // idempotent on order id
+
+    // Off-air: when not live, incoming orders are ignored entirely.
+    if (!this.live) return null;
 
     const buyerId = String(raw.buyerId);
     const items = raw.items || [];
@@ -239,6 +283,39 @@ export class QueueEngine extends EventEmitter {
     this.emit('change', { reason: 'priority-config', priorityItems: this.priorityItems });
   }
 
+  /** Start a live: archives the finished stream, clears the queue, and begins
+   *  accepting orders. */
+  goLive() {
+    // Archive the stream that just finished (if it had any fulfilled orders).
+    const records = this.fulfilledRecords();
+    if (records.length) {
+      this.history.unshift({
+        id: String(this.sessionStartedAt || Date.now()),
+        startedAt: this.sessionStartedAt || null,
+        endedAt: Date.now(),
+        count: records.length,
+        value: records.reduce((s, r) => s + r.total, 0),
+        fulfilled: records,
+      });
+      this.history = this.history.slice(0, MAX_HISTORY);
+      this._persistHistory();
+    }
+    this.orders.clear();
+    this.openBatch.clear();
+    this.sessionStartedAt = Date.now();
+    this.live = true;
+    this._persist();
+    this.emit('change', { reason: 'go-live' });
+  }
+
+  /** End a live: stop accepting new orders. The current queue stays so any
+   *  remaining orders can still be fulfilled from the panel. */
+  endLive() {
+    this.live = false;
+    this._persist();
+    this.emit('change', { reason: 'end-live' });
+  }
+
   /**
    * Active queue, top = next to handle:
    *   1. Manually bumped slot.
@@ -273,6 +350,7 @@ export class QueueEngine extends EventEmitter {
         key,
         buyer: first.buyer,
         buyerId: first.buyerId,
+        orderIds: orders.map((o) => o.id),
         itemCount: orders.reduce((n, o) => n + o.items.reduce((m, i) => m + (i.qty || 1), 0), 0),
         total: orders.reduce((s, o) => s + o.total, 0),
         fulfilledAt: Math.max(...orders.map((o) => o.fulfilledAt || 0)),
@@ -290,6 +368,7 @@ export class QueueEngine extends EventEmitter {
       fulfilledCount: this.fulfilledSlots().length,
       activeValue: active.reduce((s, e) => s + e.total, 0),
       priorityItems: this.priorityItems,
+      live: this.live,
     };
   }
 
@@ -299,6 +378,13 @@ export class QueueEngine extends EventEmitter {
       fulfilled: this.fulfilledSlots().slice(0, 50),
       stats: this.stats(),
       config: { priorityItems: this.priorityItems },
+      history: this.history.map((s) => ({
+        id: s.id,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        count: s.count,
+        value: s.value,
+      })),
     };
   }
 
