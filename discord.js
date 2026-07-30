@@ -124,6 +124,14 @@ export async function startDiscord(queue) {
       if (liveMessage) {
         await liveMessage.edit(content);
       } else {
+        // Fresh start (e.g. after a redeploy): clear any previous queue
+        // messages this bot left behind so the channel keeps a single message.
+        try {
+          const recent = await channel.messages.fetch({ limit: 25 });
+          for (const m of recent.values()) {
+            if (m.author.id === client.user.id) { try { await m.delete(); } catch {} }
+          }
+        } catch {}
         liveMessage = await channel.send(content);
         try { await liveMessage.pin(); } catch {}
       }
