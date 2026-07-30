@@ -55,6 +55,7 @@
   .actions button{padding:8px 11px}
   .fulfill{background:var(--done);border-color:var(--done);color:#04180d}
   .bumpb{background:transparent;color:var(--accent)}
+  .labelb{background:transparent;color:#cdd4e4}
   .empty{color:var(--muted);text-align:center;padding:40px;border:1px dashed var(--line);border-radius:12px}
   .done-row{display:flex;gap:12px;align-items:center;padding:8px 12px;color:var(--muted);font-size:13px;
     border-bottom:1px solid var(--line)}
@@ -149,6 +150,62 @@
   async function post(url){ await fetch(url,{method:'POST'}); }
   function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
   function bump(key){ post('/api/bump/'+encodeURIComponent(key)); }
+
+  // --- Thermal bag label (2.25" x 1.25") ---
+  // Renders username + order number(s) into an off-screen iframe whose page size
+  // is locked to the label, auto-shrinks the text to fit, and opens the print
+  // dialog. Pick your thermal printer there (set it as default to make it 1 click).
+  function printLabel(key){
+    const e = (state.queue||[]).find(x=>x.key===key);
+    if(!e) return;
+    const uname = e.buyer || 'Buyer';
+    const ords = (e.orderIds||[]);
+    const ordLine = ords.map(id=>'#'+id).join('   ');
+    const countLine = (e.orderCount>1) ? (e.orderCount+' orders in this bag') : '';
+    const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      @page{size:2.25in 1.25in;margin:0}
+      html,body{margin:0;padding:0;width:2.25in;height:1.25in}
+      body{display:flex;flex-direction:column;justify-content:center;align-items:center;
+        box-sizing:border-box;padding:0.05in 0.08in;font-family:Arial,Helvetica,sans-serif;
+        text-align:center;color:#000;background:#fff;overflow:hidden}
+      .uname{font-weight:800;line-height:1.03;word-break:break-word;max-width:100%}
+      .count{font-size:10px;font-weight:700;margin-top:2px;text-transform:uppercase;letter-spacing:.4px}
+      .ord{margin-top:5px;font-family:'Courier New',monospace;font-weight:700;line-height:1.15;
+        word-break:break-all;max-width:100%}
+    </style></head><body>
+      <div class="uname" id="u">${esc(uname)}</div>
+      ${countLine?`<div class="count">${esc(countLine)}</div>`:''}
+      ${ordLine?`<div class="ord" id="o">${esc(ordLine)}</div>`:''}
+      <script>(function(){
+        function shrinkWidth(el,start,min){var s=start;el.style.fontSize=s+'px';
+          while(s>min && el.scrollWidth>el.clientWidth){s--;el.style.fontSize=s+'px';}return s;}
+        var b=document.body;
+        var u=document.getElementById('u');var o=document.getElementById('o');
+        var us=shrinkWidth(u,32,11);
+        var os=o?shrinkWidth(o,13,7):0;
+        // Height fit: the order-number line is the usual overflow culprit with a
+        // repeat buyer, so shrink it first, then the name. overflow:hidden clips
+        // anything left over so a label never bleeds past its 2.25x1.25 area.
+        var guard=0;
+        while(b.scrollHeight>b.clientHeight && guard<120){
+          if(o && os>7){ os--; o.style.fontSize=os+'px'; }
+          else if(us>9){ us--; u.style.fontSize=us+'px'; }
+          else break;
+          guard++;
+        }
+        window.focus();
+        setTimeout(function(){window.print();},60);
+      })();<\/script>
+    </body></html>`;
+    let f = document.getElementById('labelFrame');
+    if(!f){
+      f = document.createElement('iframe');
+      f.id = 'labelFrame';
+      f.style.cssText = 'position:fixed;left:-10000px;top:0;width:2.4in;height:1.4in;border:0;background:#fff';
+      document.body.appendChild(f);
+    }
+    f.srcdoc = doc;
+  }
   async function toggleLive(){
     const live = (state.stats||{}).live;
     if(!live){
@@ -188,6 +245,7 @@
       + `<div class="items">${esc(itemStr)}</div></div>`
       + `<div class="money">${money(e.total)}</div>`
       + `<div class="actions">${e.bumped?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
+      + `<button class="labelb" title="Print 2.25×1.25 bag label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`;
   }
   function slotSig(e){
