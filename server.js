@@ -8,11 +8,13 @@
 
 import 'dotenv/config';
 import crypto from 'node:crypto';
+import fs from 'node:fs';
 import express from 'express';
 import http from 'node:http';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Server as IOServer } from 'socket.io';
+import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
 import { mountWebhook, tiktokEnabled } from './tiktok.js';
@@ -27,6 +29,49 @@ const PANEL_PASSWORD = process.env.PANEL_PASSWORD || 'changeme';
 const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(24).toString('hex');
 if (PANEL_PASSWORD === 'changeme') {
   console.warn('[auth] PANEL_PASSWORD not set — using insecure default "changeme". Set it in your host env!');
+}
+
+// --- Two-factor (TOTP) config ---
+// MFA turns on automatically once TOTP_SECRET is set. To disable / recover from
+// a lost authenticator, clear TOTP_SECRET in the host env.
+const TOTP_SECRET = process.env.TOTP_SECRET || '';
+const MFA_ENABLED = !!TOTP_SECRET;
+authenticator.options = { window: 1 }; // tolerate ~30s clock drift each way
+const BACKUP_HASHES = (process.env.BACKUP_CODES || '')
+  .split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+const MFA_STATE_FILE = path.join(process.cwd(), 'data', 'mfa-used.json');
+
+function usedBackupCodes() {
+  try { return new Set(JSON.parse(fs.readFileSync(MFA_STATE_FILE, 'utf8'))); }
+  catch { return new Set(); }
+}
+function consumeBackupCode(hash) {
+  const used = usedBackupCodes();
+  used.add(hash);
+  try {
+    fs.mkdirSync(path.dirname(MFA_STATE_FILE), { recursive: true });
+    fs.writeFileSync(MFA_STATE_FILE, JSON.stringify([...used]));
+  } catch (e) { console.warn('[mfa] could not persist used backup code:', e.message); }
+}
+
+// Verify the second factor: a 6-digit TOTP, or a one-time backup code.
+function verifySecondFactor(input) {
+  if (!MFA_ENABLED) return true;
+  const raw = String(input || '').trim();
+  if (!raw) return false;
+  const digits = raw.replace(/[^0-9]/g, '');
+  if (/^\d{6}$/.test(digits)) {
+    try { return authenticator.verify({ token: digits, secret: TOTP_SECRET }); }
+    catch { return false; }
+  }
+  // Backup code: strip separators, hash, check it exists and isn't used yet.
+  const normalized = raw.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+  const hash = crypto.createHash('sha256').update(normalized).digest('hex');
+  if (BACKUP_HASHES.includes(hash) && !usedBackupCodes().has(hash)) {
+    consumeBackupCode(hash);
+    return true;
+  }
+  return false;
 }
 
 const queue = new QueueEngine();
@@ -87,9 +132,10 @@ function publicView() {
 app.get('/login', (_req, res) => res.sendFile(path.join(__dirname, 'login.html')));
 app.post('/login', (req, res) => {
   const pw = (req.body && req.body.password) || '';
-  const ok = pw.length === PANEL_PASSWORD.length &&
+  const okPw = pw.length === PANEL_PASSWORD.length &&
     crypto.timingSafeEqual(Buffer.from(pw), Buffer.from(PANEL_PASSWORD));
-  if (!ok) return res.redirect('/login?e=1');
+  const okMfa = verifySecondFactor(req.body && req.body.code);
+  if (!okPw || !okMfa) return res.redirect('/login?e=1');
   res.setHeader('Set-Cookie',
     `tcgauth=${makeToken()}; HttpOnly; Secure; Path=/; Max-Age=2592000; SameSite=Lax`);
   res.redirect('/');
