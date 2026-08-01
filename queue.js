@@ -394,4 +394,16 @@ export class QueueEngine extends EventEmitter {
     this._persist();
     this.emit('change', { reason: 'reset' });
   }
+
+  /** Inject a synthetic order for testing (e.g. label printing) regardless of
+   *  live state. Behaves like a real ingest otherwise (merges by buyer, etc.). */
+  injectTestOrder(raw) {
+    const wasLive = this.live;
+    this.live = true;
+    const order = this.upsertOrder(raw);
+    this.live = wasLive;
+    this._persist();
+    this.emit('change', { reason: 'test-order' });
+    return order;
+  }
 }
