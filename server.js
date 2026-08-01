@@ -210,13 +210,27 @@ app.post('/api/live/off', requireAuth, (_req, res) => { queue.endLive(); res.jso
 // ---------- Fulfilled export (CSV) + stream history (admin only) ----------
 function toCsv(records) {
   const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
+  // Force spreadsheet apps (Excel, Google Sheets, Numbers) to treat a value as
+  // TEXT so long order numbers aren't turned into scientific notation. Emits a
+  // ="value" formula cell, CSV-escaped.
+  const escText = (v) => {
+    const cell = '="' + String(v == null ? '' : v) + '"';
+    return '"' + cell.replace(/"/g, '""') + '"';
+  };
   const header = ['Order #', 'Buyer', 'Items', 'Total qty', 'Order total', 'Fulfilled at'];
   const lines = [header.map(esc).join(',')];
   for (const r of records) {
     const items = (r.items || []).map((i) => `${i.qty}x ${i.name}`).join('; ');
     const qty = (r.items || []).reduce((n, i) => n + (i.qty || 1), 0);
     const when = r.fulfilledAt ? new Date(r.fulfilledAt).toISOString() : '';
-    lines.push([r.orderId, r.buyer, items, qty, Number(r.total || 0).toFixed(2), when].map(esc).join(','));
+    lines.push([
+      escText(r.orderId),                       // keep the full order # as text
+      esc(r.buyer),
+      esc(items),
+      esc(qty),
+      esc(Number(r.total || 0).toFixed(2)),
+      esc(when),
+    ].join(','));
   }
   return lines.join('\r\n');
 }
