@@ -117,6 +117,7 @@ export class QueueEngine extends EventEmitter {
       .sort((a, b) => (b.fulfilledAt || 0) - (a.fulfilledAt || 0))
       .map((o) => ({
         orderId: o.id,
+        buyerId: o.buyerId,
         buyer: o.buyer,
         items: o.items,
         total: o.total,
@@ -184,6 +185,11 @@ export class QueueEngine extends EventEmitter {
     );
     if (!orders.length) return null;
     const first = orders.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b));
+    // How many orders from this same buyer were already fulfilled earlier this
+    // stream — powers the "ordered earlier today" heads-up badge in the panel.
+    const priorFulfilled = [...this.orders.values()].filter(
+      (o) => o.buyerId === first.buyerId && o.status === 'fulfilled'
+    ).length;
     const priorityOrders = orders.filter((o) => o.hasPriority);
     const isPriority = priorityOrders.length > 0;
     const priorityAt = isPriority
@@ -216,6 +222,7 @@ export class QueueEngine extends EventEmitter {
       firstOrderAt: first.createdAt,
       priorityAt,
       bumped: !!first.bumped,
+      priorFulfilled,
       _bumpKey: batchKey,
     };
   }
@@ -393,6 +400,23 @@ export class QueueEngine extends EventEmitter {
     this.openBatch.clear();
     this._persist();
     this.emit('change', { reason: 'reset' });
+  }
+
+  /** Remove a slot from the queue WITHOUT fulfilling it (e.g. the buyer
+   *  cancelled). Marked 'removed' so it drops out of the active queue, the
+   *  fulfilled list, and exports, while keeping a record on disk. */
+  removeSlot(batchKey) {
+    const orders = [...this.orders.values()].filter(
+      (o) => o.batchKey === batchKey && o.status === 'queued'
+    );
+    if (!orders.length) return null;
+    const buyerId = orders[0].buyerId;
+    const now = Date.now();
+    for (const o of orders) { o.status = 'removed'; o.removedAt = now; o.bumped = false; }
+    if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
+    this._persist();
+    this.emit('change', { reason: 'removed', batchKey });
+    return { batchKey };
   }
 
   /** Inject a synthetic order for testing (e.g. label printing) regardless of

@@ -178,6 +178,7 @@ app.post('/api/priority-items', requireAuth, (req, res) => {
   res.json({ ok: true, priorityItems: queue.priorityItems });
 });
 app.post('/api/reset', requireAuth, (_req, res) => { queue.reset(); res.json({ ok: true }); });
+app.post('/api/remove/:key', requireAuth, (req, res) => res.json({ ok: !!queue.removeSlot(req.params.key) }));
 
 // Inject a synthetic order for testing label printing / the panel. Admin only.
 // Optional query: ?buyer=name&n=1&item=Test%20Pack
@@ -217,8 +218,45 @@ function toCsv(records) {
     const cell = '="' + String(v == null ? '' : v) + '"';
     return '"' + cell.replace(/"/g, '""') + '"';
   };
-  const header = ['Order #', 'Buyer', 'Items', 'Total qty', 'Order total', 'Fulfilled at'];
-  const lines = [header.map(esc).join(',')];
+  const lines = [];
+
+  // ---- Summary by buyer (fulfilled) — quick cross-check for shipping ----
+  const groups = new Map();
+  for (const r of records) {
+    const gid = r.buyerId || r.buyer || r.orderId;
+    if (!groups.has(gid)) groups.set(gid, { buyer: r.buyer, orderIds: [], items: 0, total: 0 });
+    const g = groups.get(gid);
+    g.orderIds.push(r.orderId);
+    g.items += (r.items || []).reduce((n, i) => n + (i.qty || 1), 0);
+    g.total += Number(r.total || 0);
+  }
+  const summary = [...groups.values()].sort((a, b) =>
+    String(a.buyer).toLowerCase().localeCompare(String(b.buyer).toLowerCase()));
+  const totalItems = records.reduce((n, r) => n + (r.items || []).reduce((m, i) => m + (i.qty || 1), 0), 0);
+  const totalValue = records.reduce((s, r) => s + Number(r.total || 0), 0);
+  lines.push(esc('SUMMARY BY BUYER — fulfilled this stream'));
+  lines.push(['Buyer', '# Orders', 'Order number(s)', 'Total items', 'Total value'].map(esc).join(','));
+  for (const g of summary) {
+    lines.push([
+      esc(g.buyer),
+      esc(g.orderIds.length),
+      escText(g.orderIds.join('  ')),           // text so long numbers survive
+      esc(g.items),
+      esc(g.total.toFixed(2)),
+    ].join(','));
+  }
+  lines.push([
+    esc(`TOTAL — ${summary.length} buyer${summary.length === 1 ? '' : 's'}`),
+    esc(records.length),
+    esc(''),
+    esc(totalItems),
+    esc(totalValue.toFixed(2)),
+  ].join(','));
+  lines.push(''); // blank separator row
+
+  // ---- All fulfilled orders (detail) ----
+  lines.push(esc('ALL FULFILLED ORDERS'));
+  lines.push(['Order #', 'Buyer', 'Items', 'Total qty', 'Order total', 'Fulfilled at'].map(esc).join(','));
   for (const r of records) {
     const items = (r.items || []).map((i) => `${i.qty}x ${i.name}`).join('; ');
     const qty = (r.items || []).reduce((n, i) => n + (i.qty || 1), 0);

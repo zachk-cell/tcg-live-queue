@@ -49,6 +49,7 @@
     white-space:nowrap;flex:none}
   .badge.pri{background:var(--pri);color:#2a1e00}
   .badge.multi{background:#31384a;color:#cdd4e4}
+  .badge.back{background:#12303a;color:#7fdce8}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
   .actions{display:flex;gap:8px;align-items:center}
@@ -56,6 +57,10 @@
   .fulfill{background:var(--done);border-color:var(--done);color:#04180d;margin-left:16px}
   .bumpb{background:transparent;color:var(--accent)}
   .labelb{background:transparent;color:#cdd4e4}
+  .removeb{background:transparent;color:var(--muted);border:1px solid transparent;padding:6px 9px;
+    font-size:14px;line-height:1;flex:none}
+  .removeb:hover{color:var(--danger);border-color:var(--danger)}
+  button.danger{background:var(--danger);border-color:var(--danger);color:#fff}
   .empty{color:var(--muted);text-align:center;padding:40px;border:1px dashed var(--line);border-radius:12px}
   .done-row{display:flex;gap:12px;align-items:center;padding:8px 12px;color:var(--muted);font-size:13px;
     border-bottom:1px solid var(--line)}
@@ -127,6 +132,17 @@
   <div id="fulfilled"></div>
 </main>
 
+<div class="modal" id="confirmModal">
+  <div class="card">
+    <h3 id="cm-title">Confirm</h3>
+    <p id="cm-body"></p>
+    <div class="row">
+      <button class="ghost" id="cm-cancel">Cancel</button>
+      <button class="primary" id="cm-ok">Confirm</button>
+    </div>
+  </div>
+</div>
+
 <div class="modal" id="modal">
   <div class="card">
     <h3>Priority items</h3>
@@ -153,6 +169,33 @@
   async function post(url){ await fetch(url,{method:'POST'}); }
   function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
   function bump(key){ post('/api/bump/'+encodeURIComponent(key)); }
+
+  // Deliberate confirmation modal (returns a Promise<boolean>). Used for the
+  // destructive actions — Reset, End Live, Remove — so they can't be blown
+  // through by a stray click the way a native confirm() sometimes can.
+  function uiConfirm({title, body, confirmText='Confirm', danger=false}){
+    return new Promise((resolve)=>{
+      const m=document.getElementById('confirmModal');
+      document.getElementById('cm-title').textContent=title;
+      document.getElementById('cm-body').textContent=body;
+      const ok=document.getElementById('cm-ok');
+      const cancel=document.getElementById('cm-cancel');
+      ok.textContent=confirmText;
+      ok.className = danger ? 'danger' : 'primary';
+      m.classList.add('open');
+      const done=(v)=>{ m.classList.remove('open'); ok.onclick=null; cancel.onclick=null; resolve(v); };
+      ok.onclick=()=>done(true);
+      cancel.onclick=()=>done(false);
+    });
+  }
+
+  // Remove an order from the queue without fulfilling it (e.g. buyer cancelled).
+  async function removeOrder(key){
+    if(await uiConfirm({title:'Remove this order from the queue?',
+      body:'Use this if the buyer cancelled. The order leaves the queue and is NOT counted as fulfilled or exported.',
+      confirmText:'Remove order', danger:true}))
+      await post('/api/remove/'+encodeURIComponent(key));
+  }
   // Undo an accidental fulfill: move the order back into the active queue.
   async function reopenOrder(key){
     try {
@@ -172,18 +215,22 @@
     const uname = e.buyer || 'Buyer';
     const ords = (e.orderIds||[]);
     const ordLine = ords.map(id=>'#'+id).join('   ');
-    const countLine = (e.orderCount>1) ? (e.orderCount+' orders in this bag') : '';
+    const countLine = (e.orderCount>1) ? (e.orderCount+' orders in this batch') : '';
+    const flag = (e.priorFulfilled>0) ? '🔁 EARLIER ORDERS TODAY' : '';
     const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       @page{size:2.25in 1.25in;margin:0}
       html,body{margin:0;padding:0;width:2.25in;height:1.25in}
       body{display:flex;flex-direction:column;justify-content:center;align-items:center;
         box-sizing:border-box;padding:0.05in 0.08in;font-family:Arial,Helvetica,sans-serif;
         text-align:center;color:#000;background:#fff;overflow:hidden}
+      .flag{background:#000;color:#fff;font-weight:800;font-size:9px;padding:2px 7px;border-radius:3px;
+        letter-spacing:.5px;margin-bottom:3px;white-space:nowrap}
       .uname{font-weight:800;line-height:1.03;word-break:break-word;max-width:100%}
       .count{font-size:10px;font-weight:700;margin-top:2px;text-transform:uppercase;letter-spacing:.4px}
       .ord{margin-top:5px;font-family:'Courier New',monospace;font-weight:700;line-height:1.15;
         word-break:break-all;max-width:100%}
     </style></head><body>
+      ${flag?`<div class="flag">${esc(flag)}</div>`:''}
       <div class="uname" id="u">${esc(uname)}</div>
       ${countLine?`<div class="count">${esc(countLine)}</div>`:''}
       ${ordLine?`<div class="ord" id="o">${esc(ordLine)}</div>`:''}
@@ -225,15 +272,21 @@
   async function toggleLive(){
     const live = (state.stats||{}).live;
     if(!live){
-      if(!confirm('Start a new live?\n\nThis CLEARS the current queue and begins accepting orders.')) return;
+      if(!(await uiConfirm({title:'Start a new live?',
+        body:'This clears the current queue and begins accepting new orders.',
+        confirmText:'Go live', danger:false}))) return;
       await post('/api/live/on');
     } else {
-      if(!confirm('End the live?\n\nNew orders will stop being added. The current queue stays so you can finish fulfilling it.')) return;
+      if(!(await uiConfirm({title:'End the live?',
+        body:'New orders will stop entering the queue. Your current queue stays so you can finish fulfilling everything that\'s left.',
+        confirmText:'End live', danger:true}))) return;
       await post('/api/live/off');
     }
   }
   async function resetQueue(){
-    if(confirm('Clear the entire active + fulfilled queue? (Priority item settings are kept.)'))
+    if(await uiConfirm({title:'Reset the entire queue?',
+      body:'This clears every active AND fulfilled order for the current stream. Priority words are kept. This cannot be undone.',
+      confirmText:'Yes, reset everything', danger:true}))
       await post('/api/reset');
   }
 
@@ -255,17 +308,20 @@
     const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
     const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
     const countBadge = `<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
+    const backBadge = (e.priorFulfilled>0)
+      ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
     const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
-    return `<div class="pos">${e.position}</div>`
-      + `<div class="who"><div class="name">${esc(e.buyer)} ${priBadge} ${countBadge} ${ordNos}</div>`
+    return `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
+      + `<div class="pos">${e.position}</div>`
+      + `<div class="who"><div class="name">${esc(e.buyer)} ${priBadge} ${countBadge} ${backBadge} ${ordNos}</div>`
       + `<div class="items">${esc(itemStr)}</div></div>`
+      + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<div class="money">${money(e.total)}</div>`
       + `<div class="actions">${e.bumped?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
-      + `<button class="labelb" title="Print 2.25×1.25 bag label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`;
   }
   function slotSig(e){
-    return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.orderIds.join(','),
+    return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,e.orderIds.join(','),
       e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
   }
   function renderQueue(){
