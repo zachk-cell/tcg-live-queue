@@ -181,11 +181,16 @@
           while(s>min && el.scrollWidth>el.clientWidth){s--;el.style.fontSize=s+'px';}return s;}
         var b=document.body;
         var u=document.getElementById('u');var o=document.getElementById('o');
-        var us=shrinkWidth(u,32,11);
+        // Username: prefer it on ONE line — force no-wrap and shrink to fit the
+        // width. Only if it's still too wide at the floor do we allow a wrap,
+        // so normal names never break mid-word (e.g. "test_collector").
+        u.style.whiteSpace='nowrap';
+        var us=shrinkWidth(u,30,13);
+        if(u.scrollWidth>u.clientWidth){ u.style.whiteSpace='normal'; } // very long name -> wrap at floor
         var os=o?shrinkWidth(o,13,7):0;
-        // Height fit: the order-number line is the usual overflow culprit with a
-        // repeat buyer, so shrink it first, then the name. overflow:hidden clips
-        // anything left over so a label never bleeds past its 2.25x1.25 area.
+        // Overall height fit (rare, e.g. many order numbers): shrink the order
+        // line first, then the name. overflow:hidden clips anything left over so
+        // a label never bleeds past its 2.25x1.25 area.
         var guard=0;
         while(b.scrollHeight>b.clientHeight && guard<120){
           if(o && os>7){ os--; o.style.fontSize=os+'px'; }
