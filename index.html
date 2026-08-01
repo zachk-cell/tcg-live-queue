@@ -51,15 +51,18 @@
   .badge.multi{background:#31384a;color:#cdd4e4}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
-  .actions{display:flex;gap:7px}
+  .actions{display:flex;gap:8px;align-items:center}
   .actions button{padding:8px 11px}
-  .fulfill{background:var(--done);border-color:var(--done);color:#04180d}
+  .fulfill{background:var(--done);border-color:var(--done);color:#04180d;margin-left:16px}
   .bumpb{background:transparent;color:var(--accent)}
   .labelb{background:transparent;color:#cdd4e4}
   .empty{color:var(--muted);text-align:center;padding:40px;border:1px dashed var(--line);border-radius:12px}
   .done-row{display:flex;gap:12px;align-items:center;padding:8px 12px;color:var(--muted);font-size:13px;
     border-bottom:1px solid var(--line)}
   .done-row .name{color:var(--text)}
+  .undob{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:8px;
+    font-size:12px;font-weight:600;padding:5px 10px;cursor:pointer;white-space:nowrap}
+  .undob:hover{color:var(--text);border-color:var(--accent)}
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20}
   .modal.open{display:flex}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;width:min(520px,92vw)}
@@ -150,6 +153,14 @@
   async function post(url){ await fetch(url,{method:'POST'}); }
   function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
   function bump(key){ post('/api/bump/'+encodeURIComponent(key)); }
+  // Undo an accidental fulfill: move the order back into the active queue.
+  async function reopenOrder(key){
+    try {
+      const r = await fetch('/api/reopen/'+encodeURIComponent(key), {method:'POST'});
+      const j = await r.json().catch(()=>({}));
+      if(!j.ok) alert("Couldn't undo this one — that buyer already has a newer order in the queue, so it can't merge back automatically.");
+    } catch(e){ /* ignore */ }
+  }
 
   // --- Thermal bag label (2.25" x 1.25") ---
   // Renders username + order number(s) into an off-screen iframe whose page size
@@ -326,6 +337,7 @@
         <span class="name">${esc(s.buyer)}</span>
         <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
         <span style="margin-left:auto">${money(s.total)}</span>
+        <button class="undob" title="Move this order back into the queue" onclick="reopenOrder('${s.key}')">↩ Undo</button>
       </div>`).join('') : '<div class="empty">Nothing fulfilled yet this stream.</div>';
   }
 
