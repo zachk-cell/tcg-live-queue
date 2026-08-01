@@ -197,14 +197,14 @@ async function fetchOrderDetail(orderId) {
   return normalizeOrder(order);
 }
 
-// Search for order IDs created since `sinceEpoch` (actionable statuses only).
-async function searchRecentOrderIds(sinceEpoch) {
+// Search for order IDs created since `sinceEpoch` with a given order status.
+async function searchOrderIds(sinceEpoch, orderStatus) {
   const pathName = `/order/${API_VERSION}/orders/search`;
   const ids = [];
   let pageToken = '';
   for (let page = 0; page < 5; page++) {
     const extra = { page_size: 50, ...(pageToken ? { page_token: pageToken } : {}) };
-    const bodyReq = { create_time_ge: sinceEpoch, order_status: 'AWAITING_SHIPMENT' };
+    const bodyReq = { create_time_ge: sinceEpoch, order_status: orderStatus };
     const body = await apiCall('POST', pathName, extra, bodyReq);
     const orders = body?.data?.orders || [];
     for (const o of orders) ids.push(o.id || o.order_id);
@@ -228,11 +228,19 @@ export function startPolling(queue) {
   async function poll() {
     if (!tiktokEnabled() || !queue.live || !tokens.accessToken || !tokens.shopCipher) return;
     try {
-      const ids = await searchRecentOrderIds(sinceEpoch - 30); // small overlap for safety
+      // 1) Ingest new paid orders (awaiting shipment).
+      const ids = await searchOrderIds(sinceEpoch - 30, 'AWAITING_SHIPMENT'); // small overlap for safety
       for (const id of ids) {
         if (!id || seen.has(id)) continue;
         const detail = await fetchOrderDetail(id);
         if (detail) { seen.add(id); queue.upsertOrder(detail); }
+      }
+      // 2) Auto-remove orders that were cancelled on TikTok after entering the
+      //    queue. cancelOrder() is a no-op unless the order is currently queued.
+      const cancelledIds = await searchOrderIds(sinceEpoch - 30, 'CANCELLED');
+      for (const id of cancelledIds) {
+        if (!id) continue;
+        if (queue.cancelOrder(id)) console.log('[tiktok] auto-cancelled order', id);
       }
     } catch (e) { console.error('[tiktok] poll error:', e.message); }
   }

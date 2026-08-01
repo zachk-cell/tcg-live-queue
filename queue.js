@@ -125,6 +125,21 @@ export class QueueEngine extends EventEmitter {
       }));
   }
 
+  /** Detailed per-order records of everything cancelled this session. */
+  cancelledRecords() {
+    return [...this.orders.values()]
+      .filter((o) => o.status === 'cancelled')
+      .sort((a, b) => (b.cancelledAt || 0) - (a.cancelledAt || 0))
+      .map((o) => ({
+        orderId: o.id,
+        buyerId: o.buyerId,
+        buyer: o.buyer,
+        items: o.items,
+        total: o.total,
+        cancelledAt: o.cancelledAt,
+      }));
+  }
+
   _isPriorityOrder(items) {
     if (!this.priorityItems.length) return false;
     return (items || []).some((it) => {
@@ -293,9 +308,10 @@ export class QueueEngine extends EventEmitter {
   /** Start a live: archives the finished stream, clears the queue, and begins
    *  accepting orders. */
   goLive() {
-    // Archive the stream that just finished (if it had any fulfilled orders).
+    // Archive the stream that just finished (if it had any activity).
     const records = this.fulfilledRecords();
-    if (records.length) {
+    const cancelledRecs = this.cancelledRecords();
+    if (records.length || cancelledRecs.length) {
       this.history.unshift({
         id: String(this.sessionStartedAt || Date.now()),
         startedAt: this.sessionStartedAt || null,
@@ -303,6 +319,7 @@ export class QueueEngine extends EventEmitter {
         count: records.length,
         value: records.reduce((s, r) => s + r.total, 0),
         fulfilled: records,
+        cancelled: cancelledRecs,
       });
       this.history = this.history.slice(0, MAX_HISTORY);
       this._persistHistory();
@@ -383,6 +400,7 @@ export class QueueEngine extends EventEmitter {
     return {
       queue: this.activeQueue(),
       fulfilled: this.fulfilledSlots().slice(0, 50),
+      cancelled: this.cancelledSlots().slice(0, 50),
       stats: this.stats(),
       config: { priorityItems: this.priorityItems },
       history: this.history.map((s) => ({
@@ -402,9 +420,9 @@ export class QueueEngine extends EventEmitter {
     this.emit('change', { reason: 'reset' });
   }
 
-  /** Remove a slot from the queue WITHOUT fulfilling it (e.g. the buyer
-   *  cancelled). Marked 'removed' so it drops out of the active queue, the
-   *  fulfilled list, and exports, while keeping a record on disk. */
+  /** Remove a whole slot from the queue WITHOUT fulfilling it (e.g. the buyer
+   *  cancelled). Marked 'cancelled' so it drops out of the active queue and the
+   *  fulfilled list, and shows in the Cancelled section for tracking. */
   removeSlot(batchKey) {
     const orders = [...this.orders.values()].filter(
       (o) => o.batchKey === batchKey && o.status === 'queued'
@@ -412,11 +430,54 @@ export class QueueEngine extends EventEmitter {
     if (!orders.length) return null;
     const buyerId = orders[0].buyerId;
     const now = Date.now();
-    for (const o of orders) { o.status = 'removed'; o.removedAt = now; o.bumped = false; }
+    for (const o of orders) { o.status = 'cancelled'; o.cancelledAt = now; o.bumped = false; }
     if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
     this._persist();
-    this.emit('change', { reason: 'removed', batchKey });
+    this.emit('change', { reason: 'cancelled', batchKey });
     return { batchKey };
+  }
+
+  /** Cancel a SINGLE order by its order id (used by the auto re-check when an
+   *  order flips to CANCELLED on TikTok). Leaves any other orders in the same
+   *  buyer's slot untouched. */
+  cancelOrder(orderId) {
+    const o = this.orders.get(String(orderId));
+    if (!o || o.status !== 'queued') return null;
+    o.status = 'cancelled';
+    o.cancelledAt = Date.now();
+    o.bumped = false;
+    // If the buyer's open slot has no queued orders left, close it.
+    const stillOpen = [...this.orders.values()].some(
+      (x) => x.batchKey === o.batchKey && x.status === 'queued'
+    );
+    if (!stillOpen && this.openBatch.get(o.buyerId) === o.batchKey) this.openBatch.delete(o.buyerId);
+    this._persist();
+    this.emit('change', { reason: 'cancelled', orderId: String(orderId) });
+    return o;
+  }
+
+  /** Cancelled slots (grouped by buyer batch) for the admin Cancelled section. */
+  cancelledSlots() {
+    const byBatch = new Map();
+    for (const o of this.orders.values()) {
+      if (o.status !== 'cancelled') continue;
+      if (!byBatch.has(o.batchKey)) byBatch.set(o.batchKey, []);
+      byBatch.get(o.batchKey).push(o);
+    }
+    const slots = [...byBatch.entries()].map(([key, orders]) => {
+      const first = orders[0];
+      return {
+        key,
+        buyer: first.buyer,
+        buyerId: first.buyerId,
+        orderIds: orders.map((o) => o.id),
+        itemCount: orders.reduce((n, o) => n + o.items.reduce((m, i) => m + (i.qty || 1), 0), 0),
+        total: orders.reduce((s, o) => s + o.total, 0),
+        cancelledAt: Math.max(...orders.map((o) => o.cancelledAt || 0)),
+      };
+    });
+    slots.sort((a, b) => b.cancelledAt - a.cancelledAt);
+    return slots;
   }
 
   /** Inject a synthetic order for testing (e.g. label printing) regardless of

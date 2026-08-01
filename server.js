@@ -209,7 +209,7 @@ app.post('/api/live/on', requireAuth, (_req, res) => { queue.goLive(); res.json(
 app.post('/api/live/off', requireAuth, (_req, res) => { queue.endLive(); res.json({ ok: true, live: false }); });
 
 // ---------- Fulfilled export (CSV) + stream history (admin only) ----------
-function toCsv(records) {
+function toCsv(records, cancelled = []) {
   const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
   // Force spreadsheet apps (Excel, Google Sheets, Numbers) to treat a value as
   // TEXT so long order numbers aren't turned into scientific notation. Emits a
@@ -270,23 +270,49 @@ function toCsv(records) {
       esc(when),
     ].join(','));
   }
+
+  // ---- Cancelled orders (not fulfilled) — for tracking ----
+  lines.push('');
+  lines.push(esc('CANCELLED ORDERS — not fulfilled'));
+  lines.push(['Order #', 'Buyer', 'Items', 'Order total', 'Cancelled at'].map(esc).join(','));
+  if (!cancelled.length) {
+    lines.push(esc('(none this stream)'));
+  } else {
+    for (const r of cancelled) {
+      const items = (r.items || []).map((i) => `${i.qty}x ${i.name}`).join('; ');
+      const when = r.cancelledAt ? new Date(r.cancelledAt).toISOString() : '';
+      lines.push([
+        escText(r.orderId),
+        esc(r.buyer),
+        esc(items),
+        esc(Number(r.total || 0).toFixed(2)),
+        esc(when),
+      ].join(','));
+    }
+    lines.push([
+      esc(`TOTAL CANCELLED — ${cancelled.length} order${cancelled.length === 1 ? '' : 's'}`),
+      esc(''), esc(''),
+      esc(cancelled.reduce((s, r) => s + Number(r.total || 0), 0).toFixed(2)),
+      esc(''),
+    ].join(','));
+  }
   return lines.join('\r\n');
 }
-function sendCsv(res, filename, records) {
+function sendCsv(res, filename, records, cancelled = []) {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(toCsv(records));
+  res.send(toCsv(records, cancelled));
 }
 // Past-stream summaries for the history page.
 app.get('/api/history', requireAuth, (_req, res) => res.json({ history: queue.snapshot().history }));
-// Current stream's fulfilled orders.
+// Current stream's orders (fulfilled + cancelled).
 app.get('/api/export', requireAuth, (_req, res) =>
-  sendCsv(res, 'fulfilled-current.csv', queue.fulfilledRecords()));
+  sendCsv(res, 'orders-current.csv', queue.fulfilledRecords(), queue.cancelledRecords()));
 // A past stream by id.
 app.get('/api/export/:id', requireAuth, (req, res) => {
   const s = queue.history.find((h) => String(h.id) === req.params.id);
   if (!s) return res.status(404).send('stream not found');
-  sendCsv(res, `fulfilled-${req.params.id}.csv`, s.fulfilled || []);
+  sendCsv(res, `orders-${req.params.id}.csv`, s.fulfilled || [], s.cancelled || []);
 });
 
 // ---------- TikTok Shop ingest ----------

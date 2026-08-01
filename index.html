@@ -65,6 +65,8 @@
   .done-row{display:flex;gap:12px;align-items:center;padding:8px 12px;color:var(--muted);font-size:13px;
     border-bottom:1px solid var(--line)}
   .done-row .name{color:var(--text)}
+  .cancel-row{border-left:2px solid var(--danger)}
+  .cancel-row .name{text-decoration:line-through;color:var(--muted)}
   .undob{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:8px;
     font-size:12px;font-weight:600;padding:5px 10px;cursor:pointer;white-space:nowrap}
   .undob:hover{color:var(--text);border-color:var(--accent)}
@@ -130,6 +132,9 @@
     <a href="/api/export" style="text-decoration:none;margin-left:auto"><button class="ghost">⬇ Export CSV</button></a>
   </div>
   <div id="fulfilled"></div>
+
+  <div class="sectitle">Cancelled this stream</div>
+  <div id="cancelled"></div>
 </main>
 
 <div class="modal" id="confirmModal">
@@ -304,6 +309,7 @@
   // --- In-place list rendering so updates don't flash ---
   const slotNodes = new Map(); // key -> element (reused across updates)
   let fulfilledSig = '';
+  let cancelledSig = '';
   function slotInner(e){
     const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
     const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
@@ -386,15 +392,30 @@
     const fEl = document.getElementById('fulfilled');
     const f = state.fulfilled||[];
     const fSig = JSON.stringify(f.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
-    if(fSig === fulfilledSig) return;
-    fulfilledSig = fSig;
-    fEl.innerHTML = f.length ? f.map(s=>`<div class="done-row">
-        <span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span>
-        <span class="name">${esc(s.buyer)}</span>
-        <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
-        <span style="margin-left:auto">${money(s.total)}</span>
-        <button class="undob" title="Move this order back into the queue" onclick="reopenOrder('${s.key}')">↩ Undo</button>
-      </div>`).join('') : '<div class="empty">Nothing fulfilled yet this stream.</div>';
+    if(fSig !== fulfilledSig){
+      fulfilledSig = fSig;
+      fEl.innerHTML = f.length ? f.map(s=>`<div class="done-row">
+          <span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span>
+          <span class="name">${esc(s.buyer)}</span>
+          <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
+          <span style="margin-left:auto">${money(s.total)}</span>
+          <button class="undob" title="Move this order back into the queue" onclick="reopenOrder('${s.key}')">↩ Undo</button>
+        </div>`).join('') : '<div class="empty">Nothing fulfilled yet this stream.</div>';
+    }
+
+    const cEl = document.getElementById('cancelled');
+    const c = state.cancelled||[];
+    const cSig = JSON.stringify(c.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
+    if(cSig !== cancelledSig){
+      cancelledSig = cSig;
+      cEl.innerHTML = c.length ? c.map(s=>`<div class="done-row cancel-row">
+          <span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span>
+          <span class="name">${esc(s.buyer)}</span>
+          <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
+          <span style="margin-left:auto">${money(s.total)}</span>
+          <button class="undob" title="Put this order back into the queue" onclick="reopenOrder('${s.key}')">↩ Restore</button>
+        </div>`).join('') : '<div class="empty">No cancelled orders this stream.</div>';
+    }
   }
 
   render();
