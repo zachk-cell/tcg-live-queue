@@ -17,7 +17,7 @@ import { Server as IOServer } from 'socket.io';
 import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
-import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, debugShops, refetchShopCipher } from './tiktok.js';
+import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, debugShops, refetchShopCipher, debugRawOrder } from './tiktok.js';
 import { startDiscord, discordEnabled } from './discord.js';
 import { startSimulator } from './simulator.js';
 
@@ -326,6 +326,11 @@ app.get('/api/tiktok-debug', requireAuth, async (_req, res) => {
 // Debug: force a fresh shop-cipher fetch with the current access token (admin only).
 app.post('/api/tiktok-refetch', requireAuth, async (_req, res) => {
   try { res.json(await refetchShopCipher()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Debug: inspect one raw order's handle-ish fields to confirm the username key (admin only).
+app.get('/api/tiktok-raw-order', requireAuth, async (_req, res) => {
+  try { res.json(await debugRawOrder()); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 

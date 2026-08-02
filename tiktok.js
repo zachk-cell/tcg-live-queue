@@ -173,6 +173,29 @@ export async function refetchShopCipher() {
 }
 
 // ---------------- Orders ----------------
+// Pull the buyer's public TikTok handle/display name — NEVER the real shipping
+// name (recipient_address.name), which is private and would leak on the public
+// page. We check every field TikTok has historically used for the handle, then
+// fall back to a masked buyer id if none is present.
+function pickUsername(o) {
+  const candidates = [
+    o.buyer_username, o.username, o.user_name, o.buyer_user_name,
+    o.nickname, o.buyer_nickname, o.display_name, o.buyer_display_name,
+    o.buyer?.username, o.buyer?.nickname, o.buyer?.display_name,
+    o.user_info?.username, o.user_info?.nickname, o.user_info?.display_name,
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c.trim();
+  }
+  return '';
+}
+
+function maskedBuyerLabel(o) {
+  const id = String(o.buyer_uid || o.user_id || o.id || '');
+  const last4 = id.slice(-4);
+  return last4 ? `Buyer ${last4}` : 'Buyer';
+}
+
 export function normalizeOrder(o) {
   const lineItems = o.line_items || o.item_list || [];
   const items = lineItems.map((li) => ({
@@ -183,7 +206,7 @@ export function normalizeOrder(o) {
   return {
     id: o.id || o.order_id,
     buyerId: o.buyer_uid || o.user_id || o.buyer_email || o.id,
-    buyer: o.buyer_username || o.recipient_address?.name || o.buyer_uid || 'Buyer',
+    buyer: pickUsername(o) || maskedBuyerLabel(o),
     items,
     total: Number(o.payment?.total_amount || o.total_amount || 0),
     createdAt: o.create_time ? o.create_time * 1000 : Date.now(),
@@ -212,6 +235,52 @@ async function searchOrderIds(sinceEpoch, orderStatus) {
     if (!pageToken) break;
   }
   return ids;
+}
+
+// Admin-only inspector: fetch one raw order and surface any handle-ish fields so
+// we can confirm which key TikTok actually populates with the public username.
+// Real names (recipient_address.name/phone/address) are redacted before return.
+export async function debugRawOrder() {
+  const statuses = ['AWAITING_SHIPMENT', 'AWAITING_COLLECTION', 'UNPAID', 'COMPLETED', 'CANCELLED'];
+  const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30; // last 30 days
+  let sampleId = null;
+  for (const st of statuses) {
+    const ids = await searchOrderIds(since, st).catch(() => []);
+    if (ids && ids.length) { sampleId = ids[0]; break; }
+  }
+  if (!sampleId) return { ok: false, note: 'No orders found in the last 30 days to inspect.' };
+
+  const body = await apiCall('GET', `/order/${API_VERSION}/orders`, { ids: sampleId });
+  const order = body?.data?.orders?.[0];
+  if (!order) return { ok: false, note: 'Order detail came back empty.', raw: JSON.stringify(body).slice(0, 300) };
+
+  // Redact obvious PII so this route never leaks a real name/address.
+  const redactKeys = /name|phone|email|address|zip|postal|region|state|city|line|full_address/i;
+  const mask = (v) => {
+    if (v == null) return v;
+    const s = String(v);
+    return s ? s[0] + '***(' + s.length + ')' : s;
+  };
+  const handleish = {};
+  const scan = (obj, prefix = '') => {
+    if (!obj || typeof obj !== 'object') return;
+    for (const [k, v] of Object.entries(obj)) {
+      const path = prefix ? `${prefix}.${k}` : k;
+      if (v && typeof v === 'object' && !Array.isArray(v)) { scan(v, path); continue; }
+      if (/user|name|nick|handle|display|buyer|account/i.test(k)) {
+        handleish[path] = redactKeys.test(k) ? mask(v) : v;
+      }
+    }
+  };
+  scan(order);
+
+  return {
+    ok: true,
+    sampleOrderId: sampleId,
+    topLevelKeys: Object.keys(order),
+    handleishFields: handleish,
+    normalizedBuyer: normalizeOrder(order).buyer,
+  };
 }
 
 // ---------------- Poller ----------------
