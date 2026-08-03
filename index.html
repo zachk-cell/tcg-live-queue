@@ -38,7 +38,7 @@
   .slot.new{animation:pop .18s ease}
   .slot.priority{border-color:var(--pri);background:linear-gradient(90deg,var(--pri-bg),var(--panel))}
   .slot.bumped{outline:2px solid var(--accent)}
-  .slot.reorder{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger) inset}
+  .slot.reorder{border-color:var(--done);box-shadow:0 0 0 1px var(--done) inset}
   @keyframes pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
   /* Inline expand: full item list revealed under the row */
   .caret{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:8px;
@@ -62,11 +62,11 @@
   .badge.pri{background:var(--pri);color:#2a1e00}
   .badge.multi{background:#31384a;color:#cdd4e4}
   .badge.back{background:#12303a;color:#7fdce8}
-  .badge.reorder{background:var(--danger);color:#fff;animation:pulse 1.3s ease-in-out infinite}
+  .badge.reorder{background:var(--done);color:#04180d;animation:pulse 1.3s ease-in-out infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
   .badge.samename{background:#4a2c00;color:#ffcf87;border:1px solid var(--pri)}
-  .badge.hold{background:#5a2a00;color:#ffc078;border:1px solid #ff9d3c}
-  .slot.onhold{border-color:#ff9d3c;box-shadow:0 0 0 1px #ff9d3c inset}
+  .badge.hold{background:var(--danger);color:#fff;animation:pulse 1.3s ease-in-out infinite}
+  .slot.onhold{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger) inset}
   .idtag{color:var(--muted);font-size:11px;font-weight:600;flex:none}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
@@ -359,14 +359,14 @@
     // packed right now; if a bump/priority pushes them down it stops flashing.
     const raCount = e.reorderedAtTopCount || 0;
     const reorderBadge = (raCount > 0 && e.position === 1)
-      ? `<span class="badge reorder" title="This buyer ordered again while at the TOP of the queue — they likely have a bag being packed. Add the new item(s) to it. The ×N counts how many times they've added while at the top, so a higher number means more came in since you last checked.">⚠ ADDED MORE${raCount>1?' ×'+raCount:''}</span>` : '';
+      ? `<span class="badge reorder" title="This buyer ordered again while at the TOP of the queue — they likely have a bag being packed. Add the new item(s) to it. The ×N counts how many times they've added while at the top, so a higher number means more came in since you last checked.">＋ ADDED MORE${raCount>1?' ×'+raCount:''}</span>` : '';
     const backBadge = (e.priorFulfilled>0)
       ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
     // Two different buyers sharing an identical display name — flag + id tag.
     const dupBadge = e._dupName ? `<span class="badge samename" title="Another buyer in the queue has this exact display name — these are different people. Use the order numbers / id to keep them separate.">⚠ SAME NAME</span>` : '';
     // TikTok has this order On Hold — most often a buyer cancellation request on
     // an unshipped order (can also be an address / fraud hold). Verify before shipping.
-    const holdBadge = e.onHold ? `<span class="badge hold" title="TikTok has this order ON HOLD — most often a buyer requested to cancel an unshipped order (can also be an address or fraud hold). Check it before you ship / seal the bag.">⚠ HOLD — CHECK</span>` : '';
+    const holdBadge = e.onHold ? `<span class="badge hold" title="TikTok put this order ON HOLD — during a live this is almost always a buyer cancellation request on an unshipped order (occasionally an address or fraud hold). Do NOT ship / seal the bag until you've checked it.">⚠ CANCEL REQ</span>` : '';
     const idTag = e._dupName ? `<span class="idtag" title="Buyer id (last 4) — tells same-named buyers apart">id …${esc(e._idTag)}</span>` : '';
     const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
     const detailItems = e.items.map(i=>`<div class="di"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span></div>`).join('');
