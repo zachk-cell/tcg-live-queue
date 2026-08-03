@@ -242,7 +242,6 @@
     // outline (no fill, no emoji) to guarantee they print. Multiple can stack.
     const flags = [];
     if(e.priorFulfilled>0) flags.push('EARLIER ORDERS TODAY');
-    if(e.reorderedAtTop)   flags.push('ADDED MORE - ALREADY IN QUEUE');
     // Same-name distinction: if another buyer in the queue shares this exact
     // display name, print a last-4 id tag so the right bag goes to the right person.
     const dupe = (state.queue||[]).filter(x=>(x.buyer||'').toLowerCase()===uname.toLowerCase()).length>1;
@@ -354,9 +353,10 @@
     const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
     const countBadge = `<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
     // Loud heads-up: this buyer ordered AGAIN while already at the top (bag likely
-    // in progress). Add the new item(s) to the bag already being packed.
-    const reorderBadge = e.reorderedAtTop
-      ? `<span class="badge reorder" title="This buyer ordered again while already at the TOP of the queue — they very likely have a bag being packed right now. Add the new item(s) to it.">⚠ ADDED MORE</span>` : '';
+    // in progress). Only flash it while they're CURRENTLY #1 — the one being
+    // packed right now; if a bump/priority pushes them down it stops flashing.
+    const reorderBadge = (e.reorderedAtTop && e.position === 1)
+      ? `<span class="badge reorder" title="This buyer ordered again while at the TOP of the queue — they very likely have a bag being packed right now. Add the new item(s) to it.">⚠ ADDED MORE</span>` : '';
     const backBadge = (e.priorFulfilled>0)
       ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
     // Two different buyers sharing an identical display name — flag + id tag.
@@ -409,14 +409,14 @@
       const sig = slotSig(e);
       if(!node){
         node = document.createElement('div');
-        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+(e.reorderedAtTop?' reorder':'');
+        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'');
         node.innerHTML = slotInner(e);
         node._sig = sig;
         slotNodes.set(e.key, node);
         setTimeout(()=>node.classList.remove('new'), 260);
       } else if(node._sig !== sig){
         // update only the changed row's contents in place
-        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+(e.reorderedAtTop?' reorder':'');
+        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'');
         node.innerHTML = slotInner(e);
         node._sig = sig;
       }
