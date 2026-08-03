@@ -17,7 +17,7 @@ import { Server as IOServer } from 'socket.io';
 import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
-import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, debugShops, refetchShopCipher, debugRawOrder } from './tiktok.js';
+import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, debugShops, refetchShopCipher, debugRawOrder, debugCancellations } from './tiktok.js';
 import { startDiscord, discordEnabled } from './discord.js';
 import { startSimulator } from './simulator.js';
 
@@ -359,6 +359,11 @@ app.post('/api/tiktok-refetch', requireAuth, async (_req, res) => {
 // Debug: inspect one raw order's handle-ish fields to confirm the username key (admin only).
 app.get('/api/tiktok-raw-order', requireAuth, async (_req, res) => {
   try { res.json(await debugRawOrder()); }
+  catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Debug: probe whether this shop can read buyer cancellation requests (admin only).
+app.get('/api/tiktok-cancellations', requireAuth, async (_req, res) => {
+  try { res.json(await debugCancellations()); }
   catch (e) { res.status(500).json({ error: e.message }); }
 });
 

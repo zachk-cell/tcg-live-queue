@@ -283,6 +283,54 @@ export async function debugRawOrder() {
   };
 }
 
+// Admin-only probe: can this shop's authorization read buyer cancellation
+// requests? Tries the Search Cancellations API and also reports whether the
+// order detail already exposes on-hold / cancellation-ish fields (which need no
+// extra scope). Read-only — never approves/rejects anything.
+export async function debugCancellations() {
+  const out = { orderFieldSignal: null, cancellationsApi: null };
+
+  // (a) What the order feed already gives us for free (no extra scope):
+  try {
+    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30;
+    let sampleId = null;
+    for (const st of ['AWAITING_SHIPMENT', 'UNPAID', 'ON_HOLD']) {
+      const ids = await searchOrderIds(since, st).catch(() => []);
+      if (ids && ids.length) { sampleId = ids[0]; break; }
+    }
+    if (sampleId) {
+      const body = await apiCall('GET', `/order/${API_VERSION}/orders`, { ids: sampleId });
+      const o = body?.data?.orders?.[0] || {};
+      out.orderFieldSignal = {
+        sampleOrderId: sampleId,
+        is_on_hold_order: o.is_on_hold_order,
+        cancel_order_sla_time: o.cancel_order_sla_time,
+        cancellation_ish_keys: Object.keys(o).filter((k) => /cancel|hold/i.test(k)),
+      };
+    } else {
+      out.orderFieldSignal = { note: 'No recent orders to inspect on-hold fields.' };
+    }
+  } catch (e) { out.orderFieldSignal = { error: e.message }; }
+
+  // (b) The dedicated Search Cancellations API (may require the Return/Refund
+  //     authorization scope). We return the raw code+message so we can tell
+  //     whether it's accessible or needs re-authorization.
+  try {
+    const pathName = `/return_refund/${API_VERSION}/cancellations/search`;
+    const since = Math.floor(Date.now() / 1000) - 60 * 60 * 24 * 30;
+    const resp = await apiCall('POST', pathName, { page_size: 20 }, { create_time_ge: since });
+    out.cancellationsApi = {
+      pathTried: pathName,
+      code: resp?.code,
+      message: resp?.message,
+      count: resp?.data?.total_count ?? (resp?.data?.cancellations || []).length,
+      sampleStatuses: [...new Set((resp?.data?.cancellations || []).map((c) => c.cancel_status))].slice(0, 8),
+    };
+  } catch (e) { out.cancellationsApi = { error: e.message }; }
+
+  return out;
+}
+
 // ---------------- Poller ----------------
 export function startPolling(queue) {
   const interval = Number(process.env.TIKTOK_POLL_MS) || 10000;
