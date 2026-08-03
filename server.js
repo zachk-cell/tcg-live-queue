@@ -190,6 +190,7 @@ app.post('/api/test-order', requireAuth, (req, res) => {
   const buyerId = (req.query.buyerId && String(req.query.buyerId).slice(0, 40)) ||
     ('TESTBUYER-' + buyer.toLowerCase().replace(/[^a-z0-9]/g, ''));
   const total = req.query.total != null && !isNaN(Number(req.query.total)) ? Number(req.query.total) : 9.99;
+  const onHold = req.query.hold === '1' || req.query.hold === 'true';
   const made = [];
   for (let i = 0; i < n; i++) {
     const id = '576' + String(Date.now()).slice(-11) + String(Math.floor(Math.random() * 900) + 100);
@@ -200,6 +201,7 @@ app.post('/api/test-order', requireAuth, (req, res) => {
       items: [{ name: itemName, qty: 1 }],
       total,
       createdAt: Date.now() + i,
+      onHold,
     });
     if (order) made.push(order.id);
   }

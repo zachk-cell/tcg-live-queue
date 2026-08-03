@@ -65,6 +65,8 @@
   .badge.reorder{background:var(--danger);color:#fff;animation:pulse 1.3s ease-in-out infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
   .badge.samename{background:#4a2c00;color:#ffcf87;border:1px solid var(--pri)}
+  .badge.hold{background:#5a2a00;color:#ffc078;border:1px solid #ff9d3c}
+  .slot.onhold{border-color:#ff9d3c;box-shadow:0 0 0 1px #ff9d3c inset}
   .idtag{color:var(--muted);font-size:11px;font-weight:600;flex:none}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
@@ -362,6 +364,9 @@
       ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
     // Two different buyers sharing an identical display name — flag + id tag.
     const dupBadge = e._dupName ? `<span class="badge samename" title="Another buyer in the queue has this exact display name — these are different people. Use the order numbers / id to keep them separate.">⚠ SAME NAME</span>` : '';
+    // TikTok has this order On Hold — most often a buyer cancellation request on
+    // an unshipped order (can also be an address / fraud hold). Verify before shipping.
+    const holdBadge = e.onHold ? `<span class="badge hold" title="TikTok has this order ON HOLD — most often a buyer requested to cancel an unshipped order (can also be an address or fraud hold). Check it before you ship / seal the bag.">⚠ HOLD — CHECK</span>` : '';
     const idTag = e._dupName ? `<span class="idtag" title="Buyer id (last 4) — tells same-named buyers apart">id …${esc(e._idTag)}</span>` : '';
     const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
     const detailItems = e.items.map(i=>`<div class="di"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span></div>`).join('');
@@ -369,7 +374,7 @@
     return `<div class="slotmain">`
       + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
       + `<div class="pos">${e.position}</div>`
-      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
+      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
       + `<div class="items">${esc(itemStr)}</div></div>`
       + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
       + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
@@ -381,7 +386,7 @@
   }
   function slotSig(e){
     return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
-      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e._dupName?1:0,e._idTag||'',
+      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e._dupName?1:0,e._idTag||'',
       e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
   }
   function renderQueue(){
@@ -410,14 +415,14 @@
       const sig = slotSig(e);
       if(!node){
         node = document.createElement('div');
-        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'');
+        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.onHold?' onhold':'');
         node.innerHTML = slotInner(e);
         node._sig = sig;
         slotNodes.set(e.key, node);
         setTimeout(()=>node.classList.remove('new'), 260);
       } else if(node._sig !== sig){
         // update only the changed row's contents in place
-        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'');
+        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.onHold?' onhold':'');
         node.innerHTML = slotInner(e);
         node._sig = sig;
       }

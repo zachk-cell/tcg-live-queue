@@ -125,6 +125,24 @@ export class QueueEngine extends EventEmitter {
       }));
   }
 
+  /** Order ids of everything still queued — used by the poller to batch-refresh
+   *  On Hold status. */
+  queuedOrderIds() {
+    return [...this.orders.values()].filter((o) => o.status === 'queued').map((o) => o.id);
+  }
+
+  /** Flag/unflag a queued order as On Hold (TikTok-side). Returns true if it
+   *  actually changed, so the poller can log only real transitions. */
+  setHold(orderId, onHold) {
+    const o = this.orders.get(String(orderId));
+    if (!o || o.status !== 'queued') return false;
+    if (!!o.onHold === !!onHold) return false;
+    o.onHold = !!onHold;
+    this._persist();
+    this.emit('change', { reason: 'hold-change', orderId: String(orderId), onHold: !!onHold });
+    return true;
+  }
+
   /** Detailed per-order records of orders still queued (unfulfilled) this
    *  session — captured when a stream is archived so nothing is silently lost. */
   queuedRecords() {
@@ -210,6 +228,7 @@ export class QueueEngine extends EventEmitter {
       batchKey,
       hasPriority,
       mergedWhileTop,
+      onHold: !!raw.onHold,
     };
     this.orders.set(id, order);
     this._persist();
@@ -272,6 +291,9 @@ export class QueueEngine extends EventEmitter {
       // buyer keeps adding after you've already started combining.
       reorderedAtTop: orders.some((o) => o.mergedWhileTop),
       reorderedAtTopCount: orders.filter((o) => o.mergedWhileTop).length,
+      // TikTok put one of this slot's orders On Hold (often a buyer cancellation
+      // request on an unshipped order) — flag it so it's verified before shipping.
+      onHold: orders.some((o) => o.onHold),
       _bumpKey: batchKey,
     };
   }

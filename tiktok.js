@@ -210,6 +210,9 @@ export function normalizeOrder(o) {
     items,
     total: Number(o.payment?.total_amount || o.total_amount || 0),
     createdAt: o.create_time ? o.create_time * 1000 : Date.now(),
+    // TikTok flips an order On Hold when there's something to check before
+    // shipping — most often a buyer cancellation request on an unshipped order.
+    onHold: !!o.is_on_hold_order,
   };
 }
 
@@ -358,6 +361,20 @@ export function startPolling(queue) {
       for (const id of cancelledIds) {
         if (!id) continue;
         if (queue.cancelOrder(id)) console.log('[tiktok] auto-cancelled order', id);
+      }
+      // 3) Refresh On Hold status for orders still queued — a buyer cancellation
+      //    request on an unshipped order flips it On Hold after it's already in
+      //    the queue. One batched detail call (ids endpoint takes up to 50).
+      const queuedIds = queue.queuedOrderIds ? queue.queuedOrderIds() : [];
+      for (let i = 0; i < queuedIds.length; i += 50) {
+        const chunk = queuedIds.slice(i, i + 50);
+        const body = await apiCall('GET', `/order/${API_VERSION}/orders`, { ids: chunk.join(',') });
+        for (const o of (body?.data?.orders || [])) {
+          const id = String(o.id || o.order_id);
+          if (queue.setHold(id, !!o.is_on_hold_order)) {
+            console.log('[tiktok] order', id, o.is_on_hold_order ? 'ON HOLD' : 'hold cleared');
+          }
+        }
       }
     } catch (e) { console.error('[tiktok] poll error:', e.message); }
   }
