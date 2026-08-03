@@ -125,6 +125,22 @@ export class QueueEngine extends EventEmitter {
       }));
   }
 
+  /** Detailed per-order records of orders still queued (unfulfilled) this
+   *  session — captured when a stream is archived so nothing is silently lost. */
+  queuedRecords() {
+    return [...this.orders.values()]
+      .filter((o) => o.status === 'queued')
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+      .map((o) => ({
+        orderId: o.id,
+        buyerId: o.buyerId,
+        buyer: o.buyer,
+        items: o.items,
+        total: o.total,
+        createdAt: o.createdAt,
+      }));
+  }
+
   /** Detailed per-order records of everything cancelled this session. */
   cancelledRecords() {
     return [...this.orders.values()]
@@ -171,6 +187,17 @@ export class QueueEngine extends EventEmitter {
       this.openBatch.set(buyerId, batchKey);
     }
 
+    // Was this buyer already sitting at the TOP of the queue (position 1, i.e.
+    // very likely already being packed) when this new order merged in? Flag it
+    // so the packer is loudly told to add the new item(s) to the bag in
+    // progress instead of assuming that slot is done. (Computed before the new
+    // order is added; a merge never changes the slot's position.)
+    let mergedWhileTop = false;
+    if (mergedInto) {
+      const top = this.activeQueue()[0];
+      mergedWhileTop = !!(top && top.key === batchKey);
+    }
+
     const order = {
       id,
       buyerId,
@@ -182,6 +209,7 @@ export class QueueEngine extends EventEmitter {
       status: 'queued',
       batchKey,
       hasPriority,
+      mergedWhileTop,
     };
     this.orders.set(id, order);
     this._persist();
@@ -238,6 +266,9 @@ export class QueueEngine extends EventEmitter {
       priorityAt,
       bumped: !!first.bumped,
       priorFulfilled,
+      // True when a new order merged into this slot while it was already #1 in
+      // the queue — surfaced as a loud "ADDED MORE" badge in the panel/label.
+      reorderedAtTop: orders.some((o) => o.mergedWhileTop),
       _bumpKey: batchKey,
     };
   }
@@ -305,25 +336,33 @@ export class QueueEngine extends EventEmitter {
     this.emit('change', { reason: 'priority-config', priorityItems: this.priorityItems });
   }
 
-  /** Start a live: archives the finished stream, clears the queue, and begins
-   *  accepting orders. */
-  goLive() {
-    // Archive the stream that just finished (if it had any activity).
+  /** Archive the current stream (fulfilled + cancelled + still-unfulfilled) to
+   *  history, if it had any activity. Does NOT clear the board — callers do. */
+  _archiveCurrentStream() {
     const records = this.fulfilledRecords();
     const cancelledRecs = this.cancelledRecords();
-    if (records.length || cancelledRecs.length) {
+    const unfulfilledRecs = this.queuedRecords();
+    if (records.length || cancelledRecs.length || unfulfilledRecs.length) {
       this.history.unshift({
         id: String(this.sessionStartedAt || Date.now()),
         startedAt: this.sessionStartedAt || null,
         endedAt: Date.now(),
         count: records.length,
         value: records.reduce((s, r) => s + r.total, 0),
+        unfulfilledCount: unfulfilledRecs.length,
         fulfilled: records,
         cancelled: cancelledRecs,
+        unfulfilled: unfulfilledRecs,
       });
       this.history = this.history.slice(0, MAX_HISTORY);
       this._persistHistory();
     }
+  }
+
+  /** Start a live: archives anything left from a stream that wasn't ended,
+   *  clears the queue, and begins accepting orders. */
+  goLive() {
+    this._archiveCurrentStream(); // safety net if the previous stream wasn't ended
     this.orders.clear();
     this.openBatch.clear();
     this.sessionStartedAt = Date.now();
@@ -332,9 +371,13 @@ export class QueueEngine extends EventEmitter {
     this.emit('change', { reason: 'go-live' });
   }
 
-  /** End a live: stop accepting new orders. The current queue stays so any
-   *  remaining orders can still be fulfilled from the panel. */
+  /** End a live: archive the whole stream (fulfilled, cancelled, and any
+   *  still-unfulfilled orders) to Past streams, then clear the board so the
+   *  main page empties and everything moves to history. Stops new orders. */
   endLive() {
+    this._archiveCurrentStream();
+    this.orders.clear();
+    this.openBatch.clear();
     this.live = false;
     this._persist();
     this.emit('change', { reason: 'end-live' });
@@ -409,6 +452,7 @@ export class QueueEngine extends EventEmitter {
         endedAt: s.endedAt,
         count: s.count,
         value: s.value,
+        unfulfilledCount: s.unfulfilledCount || 0,
       })),
     };
   }

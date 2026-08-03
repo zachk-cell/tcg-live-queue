@@ -35,7 +35,7 @@
   <h1>🗂 Past streams</h1>
 </header>
 <main>
-  <p class="sub">The last few streams you've run. Each row is one stream — download its full fulfilled-orders list as a spreadsheet.</p>
+  <p class="sub">The last few streams you've run. A stream is archived here when you hit <b>End Live</b> (or start a new one). Each row is one stream — download its full order list as a spreadsheet.</p>
   <div id="list"><div class="empty">Loading…</div></div>
 </main>
 <script>
@@ -53,10 +53,11 @@
       }
       el.innerHTML = history.map(s=>{
         const label = new Date(s.endedAt).toLocaleString([], {weekday:'short',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+        const unf = s.unfulfilledCount ? ` · ${s.unfulfilledCount} unfulfilled` : '';
         return `<div class="row">
           <div>
             <div class="when">Stream ending ${esc(label)}</div>
-            <div class="meta num">${s.count} order${s.count===1?'':'s'} fulfilled · ${money(s.value)} total</div>
+            <div class="meta num">${s.count} order${s.count===1?'':'s'} fulfilled · ${money(s.value)} total${unf}</div>
           </div>
           <div class="spacer"></div>
           <a href="/api/export/${encodeURIComponent(s.id)}" style="text-decoration:none"><button class="dl">⬇ Export CSV</button></a>

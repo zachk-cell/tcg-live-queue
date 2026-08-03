@@ -209,7 +209,7 @@ app.post('/api/live/on', requireAuth, (_req, res) => { queue.goLive(); res.json(
 app.post('/api/live/off', requireAuth, (_req, res) => { queue.endLive(); res.json({ ok: true, live: false }); });
 
 // ---------- Fulfilled export (CSV) + stream history (admin only) ----------
-function toCsv(records, cancelled = []) {
+function toCsv(records, cancelled = [], unfulfilled = []) {
   const esc = (v) => '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"';
   // Force spreadsheet apps (Excel, Google Sheets, Numbers) to treat a value as
   // TEXT so long order numbers aren't turned into scientific notation. Emits a
@@ -296,23 +296,48 @@ function toCsv(records, cancelled = []) {
       esc(''),
     ].join(','));
   }
+
+  // ---- Unfulfilled orders (still in the queue when the stream ended) ----
+  lines.push('');
+  lines.push(esc('UNFULFILLED ORDERS — still in queue at stream end'));
+  lines.push(['Order #', 'Buyer', 'Items', 'Order total'].map(esc).join(','));
+  if (!unfulfilled.length) {
+    lines.push(esc('(none)'));
+  } else {
+    for (const r of unfulfilled) {
+      const items = (r.items || []).map((i) => `${i.qty}x ${i.name}`).join('; ');
+      lines.push([
+        escText(r.orderId),
+        esc(r.buyer),
+        esc(items),
+        esc(Number(r.total || 0).toFixed(2)),
+      ].join(','));
+    }
+    lines.push([
+      esc(`TOTAL UNFULFILLED — ${unfulfilled.length} order${unfulfilled.length === 1 ? '' : 's'}`),
+      esc(''), esc(''),
+      esc(unfulfilled.reduce((s, r) => s + Number(r.total || 0), 0).toFixed(2)),
+    ].join(','));
+  }
   return lines.join('\r\n');
 }
-function sendCsv(res, filename, records, cancelled = []) {
+function sendCsv(res, filename, records, cancelled = [], unfulfilled = []) {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send(toCsv(records, cancelled));
+  // Prepend a UTF-8 BOM so Excel opens accented names (Pokémon) and dashes as
+  // UTF-8 instead of mangling them into mojibake (PokÃ©mon, â€").
+  res.send('﻿' + toCsv(records, cancelled, unfulfilled));
 }
 // Past-stream summaries for the history page.
 app.get('/api/history', requireAuth, (_req, res) => res.json({ history: queue.snapshot().history }));
 // Current stream's orders (fulfilled + cancelled).
 app.get('/api/export', requireAuth, (_req, res) =>
-  sendCsv(res, 'orders-current.csv', queue.fulfilledRecords(), queue.cancelledRecords()));
+  sendCsv(res, 'orders-current.csv', queue.fulfilledRecords(), queue.cancelledRecords(), queue.queuedRecords()));
 // A past stream by id.
 app.get('/api/export/:id', requireAuth, (req, res) => {
   const s = queue.history.find((h) => String(h.id) === req.params.id);
   if (!s) return res.status(404).send('stream not found');
-  sendCsv(res, `orders-${req.params.id}.csv`, s.fulfilled || [], s.cancelled || []);
+  sendCsv(res, `orders-${req.params.id}.csv`, s.fulfilled || [], s.cancelled || [], s.unfulfilled || []);
 });
 
 // ---------- TikTok Shop ingest ----------

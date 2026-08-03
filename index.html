@@ -33,12 +33,24 @@
   button.primary{background:var(--accent2);border-color:var(--accent2)}
   button.ghost{background:transparent}
   .sectitle{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:22px 4px 10px}
-  .slot{display:flex;align-items:center;gap:12px;background:var(--panel);border:1px solid var(--line);
-    border-radius:12px;padding:12px 14px;margin-bottom:9px}
+  .slot{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:9px}
+  .slotmain{display:flex;align-items:center;gap:12px;padding:12px 14px}
   .slot.new{animation:pop .18s ease}
   .slot.priority{border-color:var(--pri);background:linear-gradient(90deg,var(--pri-bg),var(--panel))}
   .slot.bumped{outline:2px solid var(--accent)}
+  .slot.reorder{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger) inset}
   @keyframes pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  /* Inline expand: full item list revealed under the row */
+  .caret{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:8px;
+    padding:6px 9px;font-size:12px;line-height:1;flex:none;transition:transform .12s,color .12s,border-color .12s}
+  .caret:hover{color:var(--text);border-color:var(--accent)}
+  .slot.expanded .caret{transform:rotate(90deg);color:var(--accent);border-color:var(--accent)}
+  .details{display:none;border-top:1px dashed var(--line);padding:10px 16px 12px 50px}
+  .slot.expanded .details{display:block}
+  .details .di{display:flex;gap:10px;padding:4px 0;font-size:13px;border-bottom:1px solid rgba(255,255,255,.04)}
+  .details .di:last-of-type{border-bottom:none}
+  .details .diq{color:var(--muted);font-variant-numeric:tabular-nums;min-width:34px;font-weight:700}
+  .details .dord{color:var(--muted);font-size:11.5px;margin-top:7px}
   .pos{font-variant-numeric:tabular-nums;font-weight:800;font-size:18px;width:34px;text-align:center;color:var(--muted)}
   .slot.priority .pos{color:var(--pri)}
   .who{flex:1;min-width:0}
@@ -50,6 +62,10 @@
   .badge.pri{background:var(--pri);color:#2a1e00}
   .badge.multi{background:#31384a;color:#cdd4e4}
   .badge.back{background:#12303a;color:#7fdce8}
+  .badge.reorder{background:var(--danger);color:#fff;animation:pulse 1.3s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+  .badge.samename{background:#4a2c00;color:#ffcf87;border:1px solid var(--pri)}
+  .idtag{color:var(--muted);font-size:11px;font-weight:600;flex:none}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
   .actions{display:flex;gap:8px;align-items:center}
@@ -221,22 +237,33 @@
     const ords = (e.orderIds||[]);
     const ordLine = ords.map(id=>'#'+id).join('   ');
     const countLine = (e.orderCount>1) ? (e.orderCount+' orders in this batch') : '';
-    const flag = (e.priorFulfilled>0) ? '🔁 EARLIER ORDERS TODAY' : '';
+    // Thermal printers only lay down BLACK, and browsers skip background fills
+    // unless "Background graphics" is on — so flags are black text in a black
+    // outline (no fill, no emoji) to guarantee they print. Multiple can stack.
+    const flags = [];
+    if(e.priorFulfilled>0) flags.push('EARLIER ORDERS TODAY');
+    if(e.reorderedAtTop)   flags.push('ADDED MORE - ALREADY IN QUEUE');
+    // Same-name distinction: if another buyer in the queue shares this exact
+    // display name, print a last-4 id tag so the right bag goes to the right person.
+    const dupe = (state.queue||[]).filter(x=>(x.buyer||'').toLowerCase()===uname.toLowerCase()).length>1;
+    const idTag = dupe ? ('id …'+String(e.buyerId||'').slice(-4)) : '';
     const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
       @page{size:2.25in 1.25in;margin:0}
       html,body{margin:0;padding:0;width:2.25in;height:1.25in}
       body{display:flex;flex-direction:column;justify-content:center;align-items:center;
         box-sizing:border-box;padding:0.05in 0.08in;font-family:Arial,Helvetica,sans-serif;
         text-align:center;color:#000;background:#fff;overflow:hidden}
-      .flag{background:#000;color:#fff;font-weight:800;font-size:9px;padding:2px 7px;border-radius:3px;
-        letter-spacing:.5px;margin-bottom:3px;white-space:nowrap}
+      .flag{border:1.5px solid #000;color:#000;background:#fff;font-weight:800;font-size:8.5px;
+        padding:1px 6px;border-radius:3px;letter-spacing:.4px;margin-bottom:3px;white-space:nowrap}
       .uname{font-weight:800;line-height:1.03;word-break:break-word;max-width:100%}
+      .idtag{font-size:8px;font-weight:700;color:#000;margin-top:1px}
       .count{font-size:10px;font-weight:700;margin-top:2px;text-transform:uppercase;letter-spacing:.4px}
       .ord{margin-top:5px;font-family:'Courier New',monospace;font-weight:700;line-height:1.15;
         word-break:break-all;max-width:100%}
     </style></head><body>
-      ${flag?`<div class="flag">${esc(flag)}</div>`:''}
+      ${flags.map(f=>`<div class="flag">${esc(f)}</div>`).join('')}
       <div class="uname" id="u">${esc(uname)}</div>
+      ${idTag?`<div class="idtag">${esc(idTag)}</div>`:''}
       ${countLine?`<div class="count">${esc(countLine)}</div>`:''}
       ${ordLine?`<div class="ord" id="o">${esc(ordLine)}</div>`:''}
       <script>(function(){
@@ -278,13 +305,15 @@
     const live = (state.stats||{}).live;
     if(!live){
       if(!(await uiConfirm({title:'Start a new live?',
-        body:'This clears the current queue and begins accepting new orders.',
+        body:'This starts a fresh stream and begins accepting new orders. Anything left from a previous stream that wasn\'t ended is archived to Past streams first.',
         confirmText:'Go live', danger:false}))) return;
       await post('/api/live/on');
     } else {
-      if(!(await uiConfirm({title:'End the live?',
-        body:'New orders will stop entering the queue. Your current queue stays so you can finish fulfilling everything that\'s left.',
-        confirmText:'End live', danger:true}))) return;
+      const n = (state.stats||{}).activeCount||0;
+      const body = n>0
+        ? `You still have ${n} order${n===1?'':'s'} in the queue that ${n===1?"hasn't":"haven't"} been fulfilled. Ending will archive EVERYTHING (fulfilled, cancelled, and those ${n} unfulfilled) to Past streams and clear the board. New orders stop entering.`
+        : 'This archives this stream (fulfilled + cancelled) to Past streams and clears the board. New orders stop entering. You can review or export it anytime from Past streams.';
+      if(!(await uiConfirm({title:'End the live?', body, confirmText:'End live', danger:true}))) return;
       await post('/api/live/off');
     }
   }
@@ -308,31 +337,64 @@
 
   // --- In-place list rendering so updates don't flash ---
   const slotNodes = new Map(); // key -> element (reused across updates)
+  const expandedKeys = new Set(); // slots the user has expanded to see all items
   let fulfilledSig = '';
   let cancelledSig = '';
+
+  // Toggle the inline "all items" panel for a slot. Purely visual — flips a
+  // class, so it survives live updates (we re-apply from expandedKeys on render).
+  function toggleExpand(key){
+    if(expandedKeys.has(key)) expandedKeys.delete(key); else expandedKeys.add(key);
+    const node = slotNodes.get(key);
+    if(node) node.classList.toggle('expanded', expandedKeys.has(key));
+  }
+
   function slotInner(e){
     const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
     const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
     const countBadge = `<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
+    // Loud heads-up: this buyer ordered AGAIN while already at the top (bag likely
+    // in progress). Add the new item(s) to the bag already being packed.
+    const reorderBadge = e.reorderedAtTop
+      ? `<span class="badge reorder" title="This buyer ordered again while already at the TOP of the queue — they very likely have a bag being packed right now. Add the new item(s) to it.">⚠ ADDED MORE</span>` : '';
     const backBadge = (e.priorFulfilled>0)
       ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
+    // Two different buyers sharing an identical display name — flag + id tag.
+    const dupBadge = e._dupName ? `<span class="badge samename" title="Another buyer in the queue has this exact display name — these are different people. Use the order numbers / id to keep them separate.">⚠ SAME NAME</span>` : '';
+    const idTag = e._dupName ? `<span class="idtag" title="Buyer id (last 4) — tells same-named buyers apart">id …${esc(e._idTag)}</span>` : '';
     const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
-    return `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
+    const detailItems = e.items.map(i=>`<div class="di"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span></div>`).join('');
+    const detailOrds = e.orderIds.length>1 ? `<div class="dord">Order numbers: ${e.orderIds.map(id=>'#'+esc(id)).join('  ')}</div>` : '';
+    return `<div class="slotmain">`
+      + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
       + `<div class="pos">${e.position}</div>`
-      + `<div class="who"><div class="name">${esc(e.buyer)} ${priBadge} ${countBadge} ${backBadge} ${ordNos}</div>`
+      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
       + `<div class="items">${esc(itemStr)}</div></div>`
+      + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
       + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<div class="money">${money(e.total)}</div>`
       + `<div class="actions">${e.bumped?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
-      + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`;
+      + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`
+      + `</div>`
+      + `<div class="details">${detailItems}${detailOrds}</div>`;
   }
   function slotSig(e){
-    return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,e.orderIds.join(','),
-      e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
+    return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
+      e.reorderedAtTop?1:0,e._dupName?1:0,e._idTag||'',
+      e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
   }
   function renderQueue(){
     const filter = (document.getElementById('search').value||'').toLowerCase();
+    // Detect buyers who share an identical display name with ANOTHER buyer in
+    // the queue (different people, same TikTok name). Count over the WHOLE queue
+    // so a search filter never hides a duplicate. (#4)
+    const nameCounts = {};
+    for(const e of (state.queue||[])){ const n=(e.buyer||'').toLowerCase(); nameCounts[n]=(nameCounts[n]||0)+1; }
     const list = (state.queue||[]).filter(e=>!filter || e.buyer.toLowerCase().includes(filter));
+    for(const e of list){
+      e._dupName = nameCounts[(e.buyer||'').toLowerCase()]>1;
+      e._idTag = e._dupName ? String(e.buyerId||'').slice(-4) : '';
+    }
     const qEl = document.getElementById('queue');
     if(!list.length){
       if(!qEl.querySelector('.empty')) qEl.innerHTML = '<div class="empty">Queue is empty — waiting on orders.</div>';
@@ -347,21 +409,23 @@
       const sig = slotSig(e);
       if(!node){
         node = document.createElement('div');
-        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
+        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+(e.reorderedAtTop?' reorder':'');
         node.innerHTML = slotInner(e);
         node._sig = sig;
         slotNodes.set(e.key, node);
         setTimeout(()=>node.classList.remove('new'), 260);
       } else if(node._sig !== sig){
         // update only the changed row's contents in place
-        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'');
+        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+(e.reorderedAtTop?' reorder':'');
         node.innerHTML = slotInner(e);
         node._sig = sig;
       }
+      // preserve the user's expand/collapse choice across live updates
+      node.classList.toggle('expanded', expandedKeys.has(e.key));
       // move into position ONLY if it's not already there (no needless re-attach)
       if(qEl.children[idx] !== node) qEl.insertBefore(node, qEl.children[idx] || null);
     });
-    for(const [key,node] of slotNodes){ if(!seen.has(key)){ node.remove(); slotNodes.delete(key); } }
+    for(const [key,node] of slotNodes){ if(!seen.has(key)){ node.remove(); slotNodes.delete(key); expandedKeys.delete(key); } }
   }
 
   function render(){
