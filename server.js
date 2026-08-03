@@ -181,12 +181,15 @@ app.post('/api/reset', requireAuth, (_req, res) => { queue.reset(); res.json({ o
 app.post('/api/remove/:key', requireAuth, (req, res) => res.json({ ok: !!queue.removeSlot(req.params.key) }));
 
 // Inject a synthetic order for testing label printing / the panel. Admin only.
-// Optional query: ?buyer=name&n=1&item=Test%20Pack
+// Optional query: ?buyer=name&n=1&item=Test%20Pack&total=9.99&buyerId=custom
+// buyerId lets you simulate two DIFFERENT buyers who share a display name.
 app.post('/api/test-order', requireAuth, (req, res) => {
   const buyer = (req.query.buyer && String(req.query.buyer).slice(0, 40)) || 'test_buyer';
   const n = Math.max(1, Math.min(Number(req.query.n) || 1, 5));
   const itemName = (req.query.item && String(req.query.item).slice(0, 60)) || 'Test Booster Pack';
-  const buyerId = 'TESTBUYER-' + buyer.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const buyerId = (req.query.buyerId && String(req.query.buyerId).slice(0, 40)) ||
+    ('TESTBUYER-' + buyer.toLowerCase().replace(/[^a-z0-9]/g, ''));
+  const total = req.query.total != null && !isNaN(Number(req.query.total)) ? Number(req.query.total) : 9.99;
   const made = [];
   for (let i = 0; i < n; i++) {
     const id = '576' + String(Date.now()).slice(-11) + String(Math.floor(Math.random() * 900) + 100);
@@ -195,7 +198,7 @@ app.post('/api/test-order', requireAuth, (req, res) => {
       buyerId,
       buyer,
       items: [{ name: itemName, qty: 1 }],
-      total: 9.99,
+      total,
       createdAt: Date.now() + i,
     });
     if (order) made.push(order.id);
