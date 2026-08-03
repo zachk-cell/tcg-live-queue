@@ -267,8 +267,11 @@ export class QueueEngine extends EventEmitter {
       bumped: !!first.bumped,
       priorFulfilled,
       // True when a new order merged into this slot while it was already #1 in
-      // the queue — surfaced as a loud "ADDED MORE" badge in the panel/label.
+      // the queue — surfaced as a loud "ADDED MORE" badge in the panel. The
+      // count is how many times it happened, so the badge can show ×2/×3 if the
+      // buyer keeps adding after you've already started combining.
       reorderedAtTop: orders.some((o) => o.mergedWhileTop),
+      reorderedAtTopCount: orders.filter((o) => o.mergedWhileTop).length,
       _bumpKey: batchKey,
     };
   }

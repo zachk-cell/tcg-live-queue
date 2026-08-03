@@ -355,8 +355,9 @@
     // Loud heads-up: this buyer ordered AGAIN while already at the top (bag likely
     // in progress). Only flash it while they're CURRENTLY #1 — the one being
     // packed right now; if a bump/priority pushes them down it stops flashing.
-    const reorderBadge = (e.reorderedAtTop && e.position === 1)
-      ? `<span class="badge reorder" title="This buyer ordered again while at the TOP of the queue — they very likely have a bag being packed right now. Add the new item(s) to it.">⚠ ADDED MORE</span>` : '';
+    const raCount = e.reorderedAtTopCount || 0;
+    const reorderBadge = (raCount > 0 && e.position === 1)
+      ? `<span class="badge reorder" title="This buyer ordered again while at the TOP of the queue — they likely have a bag being packed. Add the new item(s) to it. The ×N counts how many times they've added while at the top, so a higher number means more came in since you last checked.">⚠ ADDED MORE${raCount>1?' ×'+raCount:''}</span>` : '';
     const backBadge = (e.priorFulfilled>0)
       ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
     // Two different buyers sharing an identical display name — flag + id tag.
@@ -380,7 +381,7 @@
   }
   function slotSig(e){
     return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
-      e.reorderedAtTop?1:0,e._dupName?1:0,e._idTag||'',
+      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e._dupName?1:0,e._idTag||'',
       e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
   }
   function renderQueue(){
