@@ -33,6 +33,10 @@
   button.primary{background:var(--accent2);border-color:var(--accent2)}
   button.ghost{background:transparent}
   .sectitle{font-size:12px;text-transform:uppercase;letter-spacing:1px;color:var(--muted);margin:22px 4px 10px}
+  .sectitle.collapser{cursor:pointer;user-select:none}
+  .sectitle .cav{display:inline-block;transition:transform .12s;font-size:9px;color:var(--muted)}
+  .sectitle.collapsed .cav{transform:rotate(-90deg)}
+  .secount{color:var(--muted);font-weight:700;letter-spacing:0}
   .slot{background:var(--panel);border:1px solid var(--line);border-radius:12px;margin-bottom:9px}
   .slotmain{display:flex;align-items:center;gap:12px;padding:12px 14px}
   .slot.new{animation:pop .18s ease}
@@ -148,13 +152,15 @@
   <div class="sectitle">Active queue — top is next</div>
   <div id="queue"></div>
 
-  <div class="sectitle" style="display:flex;align-items:center;gap:10px">
-    <span>Fulfilled this stream</span>
-    <a href="/api/export" style="text-decoration:none;margin-left:auto"><button class="ghost">⬇ Export CSV</button></a>
+  <div class="sectitle collapser" id="fhead" onclick="toggleSection('fulfilled')" style="display:flex;align-items:center;gap:8px">
+    <span class="cav">▾</span><span>Fulfilled this stream</span><span class="secount" id="f-count"></span>
+    <a href="/api/export" style="text-decoration:none;margin-left:auto" onclick="event.stopPropagation()"><button class="ghost">⬇ Export CSV</button></a>
   </div>
   <div id="fulfilled"></div>
 
-  <div class="sectitle">Cancelled this stream</div>
+  <div class="sectitle collapser" id="chead" onclick="toggleSection('cancelled')" style="display:flex;align-items:center;gap:8px">
+    <span class="cav">▾</span><span>Cancelled this stream</span><span class="secount" id="c-count"></span>
+  </div>
   <div id="cancelled"></div>
 </main>
 
@@ -349,6 +355,22 @@
   let fulfilledSig = '';
   let cancelledSig = '';
 
+  // Collapse/expand the Fulfilled + Cancelled sections (state kept in memory so
+  // it persists across live updates).
+  let fulfilledCollapsed=false, cancelledCollapsed=false;
+  function toggleSection(which){
+    if(which==='fulfilled') fulfilledCollapsed=!fulfilledCollapsed; else cancelledCollapsed=!cancelledCollapsed;
+    applyCollapse();
+  }
+  function applyCollapse(){
+    const fEl=document.getElementById('fulfilled'), cEl=document.getElementById('cancelled');
+    const fh=document.getElementById('fhead'), ch=document.getElementById('chead');
+    if(fEl) fEl.style.display=fulfilledCollapsed?'none':'';
+    if(fh) fh.classList.toggle('collapsed',fulfilledCollapsed);
+    if(cEl) cEl.style.display=cancelledCollapsed?'none':'';
+    if(ch) ch.classList.toggle('collapsed',cancelledCollapsed);
+  }
+
   // Toggle the inline "all items" panel for a slot. Purely visual — flips a
   // class, so it survives live updates (we re-apply from expandedKeys on render).
   function toggleExpand(key){
@@ -479,6 +501,7 @@
 
     const fEl = document.getElementById('fulfilled');
     const f = state.fulfilled||[];
+    document.getElementById('f-count').textContent = f.length ? '('+f.length+')' : '';
     const fSig = JSON.stringify(f.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
     if(fSig !== fulfilledSig){
       fulfilledSig = fSig;
@@ -493,6 +516,7 @@
 
     const cEl = document.getElementById('cancelled');
     const c = state.cancelled||[];
+    document.getElementById('c-count').textContent = c.length ? '('+c.length+')' : '';
     const cSig = JSON.stringify(c.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
     if(cSig !== cancelledSig){
       cancelledSig = cSig;
@@ -504,6 +528,8 @@
           <button class="undob" title="Put this order back into the queue" onclick="reopenOrder('${s.key}')">↩ Restore</button>
         </div>`).join('') : '<div class="empty">No cancelled orders this stream.</div>';
     }
+
+    applyCollapse();
   }
 
   render();

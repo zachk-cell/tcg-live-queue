@@ -276,10 +276,19 @@ export class QueueEngine extends EventEmitter {
       orderCount: orders.length,
       // Per-order breakdown (oldest first) so the panel can group the expanded
       // view by order number and separate anything added after the buyer hit #1.
+      // Same-name items WITHIN an order are summed (5× pack, not 1× pack ×5).
       orderLines: orders
         .slice()
         .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
-        .map((o) => ({ id: o.id, items: o.items || [], addedSinceTop: !!o.mergedWhileTop })),
+        .map((o) => {
+          const m = new Map();
+          for (const it of (o.items || [])) m.set(it.name, (m.get(it.name) || 0) + (it.qty || 1));
+          return {
+            id: o.id,
+            items: [...m.entries()].map(([name, qty]) => ({ name, qty })),
+            addedSinceTop: !!o.mergedWhileTop,
+          };
+        }),
       items,
       itemCount: items.reduce((n, i) => n + i.qty, 0),
       total: orders.reduce((s, o) => s + o.total, 0),
