@@ -224,11 +224,13 @@ app.post('/api/reset', requireAuth, (_req, res) => { queue.reset(); res.json({ o
 app.post('/api/remove/:key', requireAuth, (req, res) => res.json({ ok: !!queue.removeSlot(req.params.key) }));
 
 // Inject a synthetic order for testing label printing / the panel. Admin only.
-// Optional query: ?buyer=name&n=1&item=Test%20Pack&total=9.99&buyerId=custom
+// Optional query: ?buyer=name&n=1&item=Test%20Pack&total=9.99&buyerId=custom&qty=1
 // buyerId lets you simulate two DIFFERENT buyers who share a display name.
+// qty sets the quantity of the item WITHIN a single order (e.g. qty=5 = "5× pack").
 app.post('/api/test-order', requireAuth, (req, res) => {
   const buyer = (req.query.buyer && String(req.query.buyer).slice(0, 40)) || 'test_buyer';
   const n = Math.max(1, Math.min(Number(req.query.n) || 1, 5));
+  const qty = Math.max(1, Math.min(Number(req.query.qty) || 1, 99));
   const itemName = (req.query.item && String(req.query.item).slice(0, 60)) || 'Test Booster Pack';
   const buyerId = (req.query.buyerId && String(req.query.buyerId).slice(0, 40)) ||
     ('TESTBUYER-' + buyer.toLowerCase().replace(/[^a-z0-9]/g, ''));
@@ -241,7 +243,7 @@ app.post('/api/test-order', requireAuth, (req, res) => {
       id,
       buyerId,
       buyer,
-      items: [{ name: itemName, qty: 1 }],
+      items: [{ name: itemName, qty }],
       total,
       createdAt: Date.now() + i,
       onHold,
