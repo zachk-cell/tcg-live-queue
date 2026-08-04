@@ -50,7 +50,10 @@
   .details .di{display:flex;gap:10px;padding:4px 0;font-size:13px;border-bottom:1px solid rgba(255,255,255,.04)}
   .details .di:last-of-type{border-bottom:none}
   .details .diq{color:var(--muted);font-variant-numeric:tabular-nums;min-width:34px;font-weight:700}
-  .details .dord{color:var(--muted);font-size:11.5px;margin-top:7px}
+  .details .dgh{color:var(--muted);font-variant-numeric:tabular-nums;font-size:11px;font-weight:700;margin:7px 0 1px}
+  .details .dgh:first-child{margin-top:0}
+  .details .dsub{margin:9px 0 2px;font-size:11px;font-weight:800;letter-spacing:.4px;color:var(--done);text-transform:uppercase}
+  .details .dord{color:var(--muted);font-size:11.5px;margin-top:9px;border-top:1px solid rgba(255,255,255,.06);padding-top:7px}
   .pos{font-variant-numeric:tabular-nums;font-weight:800;font-size:18px;width:34px;text-align:center;color:var(--muted)}
   .slot.priority .pos{color:var(--pri)}
   .who{flex:1;min-width:0}
@@ -188,6 +191,10 @@
 
   function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
   function money(n){return '$'+Number(n||0).toFixed(2);}
+  // Shortened order # for the compact queue rows — last 8 digits, with a leading
+  // ellipsis so it's clearly a partial. Full numbers stay in the expanded view,
+  // the printed label, and the CSV export.
+  function shortId(id){ const s=String(id); return s.length>8 ? '…'+s.slice(-8) : s; }
 
   async function post(url){ await fetch(url,{method:'POST'}); }
   function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
@@ -368,9 +375,20 @@
     // an unshipped order (can also be an address / fraud hold). Verify before shipping.
     const holdBadge = e.onHold ? `<span class="badge hold" title="TikTok put this order ON HOLD — during a live this is almost always a buyer cancellation request on an unshipped order (occasionally an address or fraud hold). Do NOT ship / seal the bag until you've checked it.">⚠ CANCEL REQ</span>` : '';
     const idTag = e._dupName ? `<span class="idtag" title="Buyer id (last 4) — tells same-named buyers apart">id …${esc(e._idTag)}</span>` : '';
-    const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(id)).join(' ')}</span>`;
-    const detailItems = e.items.map(i=>`<div class="di"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span></div>`).join('');
-    const detailOrds = e.orderIds.length>1 ? `<div class="dord">Order numbers: ${e.orderIds.map(id=>'#'+esc(id)).join('  ')}</div>` : '';
+    const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(shortId(id))).join(' ')}</span>`;
+    // Expanded view: items grouped by order number, with anything the buyer added
+    // after hitting #1 pulled out under a green "Added since top of queue" header.
+    const lines = e.orderLines || e.orderIds.map(id=>({id, items:e.items, addedSinceTop:false}));
+    const multi = lines.length > 1;
+    const itemRow = (i)=>`<div class="di"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span></div>`;
+    const groupHtml = (l)=> (multi?`<div class="dgh">#${esc(shortId(l.id))}</div>`:'') + (l.items||[]).map(itemRow).join('');
+    const base = lines.filter(l=>!l.addedSinceTop);
+    const added = lines.filter(l=>l.addedSinceTop);
+    let detailItems = base.map(groupHtml).join('');
+    if(added.length){
+      detailItems += `<div class="dsub">＋ Added since top of queue</div>` + added.map(groupHtml).join('');
+    }
+    const detailOrds = `<div class="dord">Full order number${e.orderIds.length>1?'s':''}: ${e.orderIds.map(id=>'#'+esc(id)).join('  ')}</div>`;
     return `<div class="slotmain">`
       + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
       + `<div class="pos">${e.position}</div>`

@@ -274,6 +274,12 @@ export class QueueEngine extends EventEmitter {
       buyer: first.buyer,
       orderIds: orders.map((o) => o.id),
       orderCount: orders.length,
+      // Per-order breakdown (oldest first) so the panel can group the expanded
+      // view by order number and separate anything added after the buyer hit #1.
+      orderLines: orders
+        .slice()
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+        .map((o) => ({ id: o.id, items: o.items || [], addedSinceTop: !!o.mergedWhileTop })),
       items,
       itemCount: items.reduce((n, i) => n + i.qty, 0),
       total: orders.reduce((s, o) => s + o.total, 0),
