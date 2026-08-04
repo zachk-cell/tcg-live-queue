@@ -422,7 +422,7 @@
       + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
       + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<div class="money">${money(e.total)}</div>`
-      + `<div class="actions">${e.bumped?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
+      + `<div class="actions">${(e.bumped||e.position===1)?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
       + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`
       + `</div>`
       + `<div class="details">${detailItems}${detailOrds}</div>`;
