@@ -19,13 +19,17 @@
   header h1{font-size:17px;margin:0;letter-spacing:.3px}
   .dot{width:9px;height:9px;border-radius:50%;background:var(--danger);display:inline-block;margin-right:6px;box-shadow:0 0 8px rgba(255,93,93,.55)}
   .dot.live{background:var(--done);box-shadow:0 0 8px var(--done)}
-  .stats{display:flex;gap:18px;margin-left:auto;flex-wrap:wrap}
+  .stats{display:flex;gap:18px;flex-wrap:wrap}
+  .hdr-link{display:inline-flex;align-items:center;text-decoration:none;background:transparent;color:var(--text);
+    border:1px solid var(--line);border-radius:9px;font-size:13px;font-weight:600;padding:8px 12px;transition:.12s;white-space:nowrap}
+  .hdr-link:hover{filter:brightness(1.15);border-color:var(--accent)}
+  .hdr-logout{margin-left:auto}
   .stat{text-align:center;min-width:64px}
   .stat b{display:block;font-size:20px;line-height:1.1}
   .stat span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
   main{max-width:920px;margin:0 auto;padding:18px 16px 80px}
-  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
-  .toolbar input{flex:1;min-width:200px;background:var(--panel2);border:1px solid var(--line);
+  .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:nowrap}
+  .toolbar input{flex:1;min-width:140px;background:var(--panel2);border:1px solid var(--line);
     color:var(--text);padding:9px 12px;border-radius:9px;font-size:13px}
   button{cursor:pointer;border:none;border-radius:9px;font-size:13px;font-weight:600;padding:9px 14px;
     background:var(--panel2);color:var(--text);border:1px solid var(--line);transition:.12s}
@@ -122,6 +126,8 @@
 <body>
 <header>
   <h1><span id="dot" class="dot"></span>PBCC Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span> <span id="ttStatus" class="ttbadge" style="display:none"></span></h1>
+  <a href="/guide" target="_blank" class="hdr-link">📖 Guide ↗</a>
+  <a href="{{ADMIN}}/logout" class="hdr-link hdr-logout">Log out</a>
   <div class="stats">
     <div class="stat"><b id="s-active">0</b><span>In queue</span></div>
     <div class="stat"><b id="s-pri">0</b><span>Priority</span></div>
@@ -137,9 +143,7 @@
     <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
     <button class="ghost" onclick="resetQueue()">Reset</button>
     <a href="{{ADMIN}}/history" style="text-decoration:none"><button class="ghost">🗂 Past streams ↗</button></a>
-    <a href="/guide" target="_blank" style="text-decoration:none"><button class="ghost">📖 Guide ↗</button></a>
     <a href="/" target="_blank" style="text-decoration:none"><button class="ghost">Public view ↗</button></a>
-    <a href="{{ADMIN}}/logout" style="text-decoration:none"><button class="ghost">Log out</button></a>
   </div>
 
   <div class="chips" id="pri-chips"></div>
