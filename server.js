@@ -167,6 +167,9 @@ app.get(ADMIN + '/logout', (_req, res) => {
 });
 app.get(ADMIN + '/history', (req, res) =>
   sendAdminPage(res, isAuthed(req) ? 'history.html' : 'login.html'));
+// Operator quick-start guide — gated behind login (share with people who have queue access).
+app.get(ADMIN + '/guide', (req, res) =>
+  sendAdminPage(res, isAuthed(req) ? 'guide.html' : 'login.html'));
 
 // ---------- Control API (auth required) ----------
 app.get('/api/state', requireAuth, (_req, res) => res.json(queue.snapshot()));
