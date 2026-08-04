@@ -180,6 +180,12 @@ app.get('/guide', (req, res) => {
   if (guideAuthed(req)) return res.type('html').send(fs.readFileSync(path.join(__dirname, 'guide.html'), 'utf8'));
   res.type('html').send(guideLogin(req.query.e === '1'));
 });
+// Interactive, self-contained practice sandbox (fake data, no backend). Behind the
+// same guide gate; admins pass through. Nothing here touches the real queue.
+app.get('/sandbox', (req, res) => {
+  if (guideAuthed(req)) return res.type('html').send(fs.readFileSync(path.join(__dirname, 'sandbox.html'), 'utf8'));
+  res.redirect('/guide');
+});
 app.post('/guide/login', (req, res) => {
   const pw = (req.body && req.body.password) || '';
   const ok = GUIDE_PASSWORD && pw.length === GUIDE_PASSWORD.length &&
