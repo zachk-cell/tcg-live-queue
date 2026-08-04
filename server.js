@@ -30,6 +30,12 @@ const SESSION_SECRET = process.env.SESSION_SECRET || crypto.randomBytes(24).toSt
 if (PANEL_PASSWORD === 'changeme') {
   console.warn('[auth] PANEL_PASSWORD not set — using insecure default "changeme". Set it in your host env!');
 }
+// Simple (no-MFA) password just for the operator guide page, so it can be shared
+// with helpers without handing out the admin login. Set GUIDE_PASSWORD in env.
+const GUIDE_PASSWORD = process.env.GUIDE_PASSWORD || '';
+const GUIDE_TOKEN = GUIDE_PASSWORD
+  ? crypto.createHmac('sha256', SESSION_SECRET).update('guide:' + GUIDE_PASSWORD).digest('hex')
+  : '';
 
 // --- Two-factor (TOTP) config ---
 // MFA turns on automatically once TOTP_SECRET is set. To disable / recover from
@@ -148,6 +154,43 @@ app.get('/public', (_req, res) => res.redirect('/')); // keep old links working
 app.get('/privacy', (_req, res) => res.sendFile(path.join(__dirname, 'privacy.html')));
 app.get('/api/public-state', (_req, res) => res.json(publicView()));
 
+// ---------- Operator guide (simple password, no MFA) ----------
+// Admins (logged into the panel) see it directly; everyone else needs the
+// shared GUIDE_PASSWORD. If no GUIDE_PASSWORD is set, it's admin-only.
+function guideAuthed(req) {
+  if (isAuthed(req)) return true;
+  if (!GUIDE_TOKEN) return false;
+  const c = parseCookies(req.headers.cookie || '');
+  return !!(c.guideauth && c.guideauth === GUIDE_TOKEN);
+}
+const guideLogin = (err) => `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Live Queue Guide</title>
+<style>body{margin:0;background:#0f1115;color:#e8ebf2;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;display:flex;min-height:100vh;align-items:center;justify-content:center}
+.box{background:#171a21;border:1px solid #272c38;border-radius:14px;padding:26px 24px;width:min(360px,92vw);text-align:center}
+h1{font-size:18px;margin:0 0 4px}.sub{color:#8b93a7;font-size:13px;margin:0 0 16px}
+input{width:100%;background:#1d212b;border:1px solid #272c38;color:#e8ebf2;padding:11px 13px;border-radius:9px;font-size:14px;margin-bottom:10px}
+button{width:100%;background:#2b6bff;border:none;color:#fff;font-weight:700;padding:11px;border-radius:9px;font-size:14px;cursor:pointer}
+.err{color:#ff8b8b;font-size:12.5px;margin-bottom:10px}</style></head>
+<body><form class="box" method="POST" action="/guide/login">
+<h1>📖 Live Queue Guide</h1><div class="sub">Enter the guide password to continue.</div>
+${err ? '<div class="err">Incorrect password — try again.</div>' : ''}
+<input type="password" name="password" placeholder="Guide password" autofocus autocomplete="current-password"/>
+<button type="submit">View guide</button></form></body></html>`;
+
+app.get('/guide', (req, res) => {
+  if (guideAuthed(req)) return res.type('html').send(fs.readFileSync(path.join(__dirname, 'guide.html'), 'utf8'));
+  res.type('html').send(guideLogin(req.query.e === '1'));
+});
+app.post('/guide/login', (req, res) => {
+  const pw = (req.body && req.body.password) || '';
+  const ok = GUIDE_PASSWORD && pw.length === GUIDE_PASSWORD.length &&
+    crypto.timingSafeEqual(Buffer.from(pw), Buffer.from(GUIDE_PASSWORD));
+  if (ok) {
+    res.setHeader('Set-Cookie', `guideauth=${GUIDE_TOKEN}; HttpOnly; Secure; Path=/; Max-Age=7776000; SameSite=Lax`);
+    return res.redirect('/guide');
+  }
+  res.redirect('/guide?e=1');
+});
+
 // ---------- Admin pages (secret path) ----------
 app.get(ADMIN, (req, res) =>
   sendAdminPage(res, isAuthed(req) ? 'index.html' : 'login.html'));
@@ -167,9 +210,6 @@ app.get(ADMIN + '/logout', (_req, res) => {
 });
 app.get(ADMIN + '/history', (req, res) =>
   sendAdminPage(res, isAuthed(req) ? 'history.html' : 'login.html'));
-// Operator quick-start guide — gated behind login (share with people who have queue access).
-app.get(ADMIN + '/guide', (req, res) =>
-  sendAdminPage(res, isAuthed(req) ? 'guide.html' : 'login.html'));
 
 // ---------- Control API (auth required) ----------
 app.get('/api/state', requireAuth, (_req, res) => res.json(queue.snapshot()));
