@@ -17,7 +17,7 @@
   header{position:sticky;top:0;z-index:5;background:linear-gradient(180deg,#141824,#0f1115);
     border-bottom:1px solid var(--line);padding:14px 20px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
   header h1{font-size:17px;margin:0;letter-spacing:.3px}
-  .dot{width:9px;height:9px;border-radius:50%;background:#555;display:inline-block;margin-right:6px}
+  .dot{width:9px;height:9px;border-radius:50%;background:var(--danger);display:inline-block;margin-right:6px;box-shadow:0 0 8px rgba(255,93,93,.55)}
   .dot.live{background:var(--done);box-shadow:0 0 8px var(--done)}
   .stats{display:flex;gap:18px;margin-left:auto;flex-wrap:wrap}
   .stat{text-align:center;min-width:64px}
@@ -191,8 +191,6 @@
   const socket = io('/panel');
   let state = { queue: [], fulfilled: [], stats: {}, config: { priorityItems: [] } };
 
-  socket.on('connect', () => document.getElementById('dot').classList.add('live'));
-  socket.on('disconnect', () => document.getElementById('dot').classList.remove('live'));
   socket.on('state', (s) => { state = s; render(); });
 
   function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
@@ -477,6 +475,7 @@
   function render(){
     const st = state.stats||{};
     const live = !!st.live;
+    document.getElementById('dot').classList.toggle('live', live); // green = live, red = offline
     const badge = document.getElementById('liveBadge');
     badge.textContent = live ? 'LIVE' : 'OFFLINE';
     badge.classList.toggle('on', live);
