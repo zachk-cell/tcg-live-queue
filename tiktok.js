@@ -177,17 +177,32 @@ export async function refetchShopCipher() {
 // name (recipient_address.name), which is private and would leak on the public
 // page. We check every field TikTok has historically used for the handle, then
 // fall back to a masked buyer id if none is present.
-function pickUsername(o) {
-  const candidates = [
-    o.buyer_username, o.username, o.user_name, o.buyer_user_name,
-    o.nickname, o.buyer_nickname, o.display_name, o.buyer_display_name,
-    o.buyer?.username, o.buyer?.nickname, o.buyer?.display_name,
-    o.user_info?.username, o.user_info?.nickname, o.user_info?.display_name,
-  ];
-  for (const c of candidates) {
+function firstStr(...vals) {
+  for (const c of vals) {
     if (typeof c === 'string' && c.trim()) return c.trim();
   }
   return '';
+}
+// The buyer's @handle (username), preferred for the public queue line.
+function pickHandle(o) {
+  return firstStr(
+    o.buyer_username, o.username, o.user_name, o.buyer_user_name,
+    o.buyer?.username, o.user_info?.username,
+  );
+}
+// The buyer's display name / nickname — an admin-only cross-check that can
+// differ from the @handle.
+function pickDisplayName(o) {
+  return firstStr(
+    o.nickname, o.buyer_nickname, o.display_name, o.buyer_display_name,
+    o.buyer?.nickname, o.buyer?.display_name,
+    o.user_info?.nickname, o.user_info?.display_name,
+  );
+}
+// Back-compat: any handle-ish field, either kind. Used as the public label when
+// no explicit @handle is present.
+function pickUsername(o) {
+  return pickHandle(o) || pickDisplayName(o);
 }
 
 function maskedBuyerLabel(o) {
@@ -203,10 +218,14 @@ export function normalizeOrder(o) {
     sku: li.seller_sku || li.sku_id || '',
     qty: li.quantity || 1,
   }));
+  const handle = pickHandle(o);
+  const display = pickDisplayName(o);
   return {
     id: o.id || o.order_id,
     buyerId: o.buyer_uid || o.user_id || o.buyer_email || o.id,
-    buyer: pickUsername(o) || maskedBuyerLabel(o),
+    buyer: handle || display || maskedBuyerLabel(o),
+    // Admin-only cross-check. Only set when it adds information beyond the handle.
+    buyerDisplay: (display && display !== handle) ? display : '',
     items,
     total: Number(o.payment?.total_amount || o.total_amount || 0),
     createdAt: o.create_time ? o.create_time * 1000 : Date.now(),
@@ -407,6 +426,24 @@ export function tiktokStatus() {
     shop: tokens.sellerName || tokens.shopId || '',
     lastError: tokens.lastError || '',
     authUrl: process.env.TIKTOK_AUTH_URL || '',
+  };
+}
+
+// Admin-only: expose the current live tokens so they can be pinned into Render
+// env vars (which survive free-tier spin-downs). After the seller authorizes,
+// copy these three values into the service's environment and redeploy — on the
+// next boot the app re-seeds from env and auto-refreshes, so no re-authorization
+// is ever needed. Gated behind requireAuth in server.js (never public).
+export function tiktokTokensForEnv() {
+  return {
+    connected: !!(tokens.accessToken && tokens.shopCipher),
+    shop: tokens.sellerName || tokens.shopId || '',
+    note: 'Copy the three values below into Render → Environment, then Save & redeploy. This keeps the shop connected across restarts.',
+    env: {
+      TIKTOK_ACCESS_TOKEN: tokens.accessToken || '',
+      TIKTOK_REFRESH_TOKEN: tokens.refreshToken || '',
+      TIKTOK_SHOP_CIPHER: tokens.shopCipher || '',
+    },
   };
 }
 

@@ -35,6 +35,12 @@
   .brand{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.3px;padding:16px 20px 30px;
     border-top:1px solid var(--line);margin-top:10px;opacity:.8}
   .brand b{color:var(--text);font-weight:700}
+  .tally{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:16px}
+  .tally h2{font-size:13px;margin:0 0 10px;color:var(--muted);font-weight:700;letter-spacing:.4px;text-transform:uppercase}
+  .tally .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
+  .vchip{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:2px}
+  .vchip .vl{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vchip .vn{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--pri)}
 </style>
 </head>
 <body>
@@ -44,6 +50,7 @@
 </header>
 <main>
   <input id="find" class="find" placeholder="Type your username to highlight your spot…" oninput="render()" />
+  <div id="variants"></div>
   <div id="list"></div>
   <div class="note">Order totals and personal details are private and never shown here.</div>
 </main>
@@ -55,6 +62,15 @@
 
   function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
+  function renderVariants(){
+    const box = document.getElementById('variants');
+    const vs = state.variants || [];
+    if(!vs.length){ box.innerHTML = ''; return; }
+    box.innerHTML = `<div class="tally"><h2>📊 Pulled so far this stream</h2><div class="grid">${
+      vs.map(v=>`<div class="vchip"><span class="vl">${esc(v.label)}</span><span class="vn">${Number(v.count)||0}</span></div>`).join('')
+    }</div></div>`;
+  }
+
   function render(){
     const q = state.queue || [];
     const st = state.stats || {};
@@ -62,6 +78,7 @@
     document.getElementById('dot').classList.toggle('live', live); // green = live, red = offline
     const findBox = document.getElementById('find');
     const el = document.getElementById('list');
+    renderVariants();
 
     if(!live){
       document.getElementById('sub').textContent = 'Offline — no live running right now';

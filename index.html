@@ -121,6 +121,23 @@
   .offline-banner{background:#2a1a1a;border:1px solid #5a2a2a;color:#ffb3b3;border-radius:11px;
     padding:11px 14px;margin:6px 0 14px;font-size:13px}
   .ordno{color:#748099;font-variant-numeric:tabular-nums;font-size:11.5px;margin-right:6px}
+  /* Live per-slot timers */
+  .qtime{font-size:11.5px;color:#8b93a7;margin-top:3px;font-variant-numeric:tabular-nums}
+  .qtime .qtop{color:var(--pri,#ffb020);font-weight:700}
+  /* Expanded buyer cross-check line */
+  .dwho{font-size:12px;color:#9aa3b6;margin-top:8px;padding-top:8px;border-top:1px dashed #272c38}
+  .dwho b{color:#e8ebf2}
+  /* Variant counter admin card */
+  #variants-admin{margin:6px 0 14px}
+  .vcard{background:#171a21;border:1px solid #272c38;border-radius:12px;padding:12px 14px}
+  .vcard h3{margin:0 0 4px;font-size:13px}
+  .vcard .vsub{color:#8b93a7;font-size:11.5px;margin:0 0 10px}
+  .vrow{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid #21262f}
+  .vrow:first-of-type{border-top:none}
+  .vrow .vlab{flex:1;min-width:0;font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vrow input{width:74px;background:#1d212b;border:1px solid #272c38;color:#e8ebf2;padding:6px 8px;border-radius:8px;font-size:14px;text-align:center;font-variant-numeric:tabular-nums}
+  .vrow .vsave{background:#2b6bff;border:none;color:#fff;font-weight:700;padding:6px 11px;border-radius:8px;font-size:12px;cursor:pointer}
+  .vrow .vsave.saved{background:#25c26e}
 </style>
 </head>
 <body>
@@ -133,6 +150,8 @@
     <div class="stat"><b id="s-pri">0</b><span>Priority</span></div>
     <div class="stat"><b id="s-val">$0</b><span>Queue value</span></div>
     <div class="stat"><b id="s-done">0</b><span>Fulfilled</span></div>
+    <div class="stat"><b id="s-avgq">—</b><span>Avg in queue</span></div>
+    <div class="stat"><b id="s-avgt">—</b><span>Avg at top</span></div>
   </div>
 </header>
 
@@ -147,6 +166,8 @@
   </div>
 
   <div class="chips" id="pri-chips"></div>
+
+  <div id="variants-admin"></div>
 
   <div id="offline-banner" class="offline-banner" style="display:none">
     ⚫ You're <b>offline</b> — new orders are being ignored and won't enter the queue. Hit <b>Go Live</b> to start a fresh queue and begin accepting orders.
@@ -204,6 +225,16 @@
   // ellipsis so it's clearly a partial. Full numbers stay in the expanded view,
   // the printed label, and the CSV export.
   function shortId(id){ const s=String(id); return s.length>8 ? '…'+s.slice(-8) : s; }
+  // Human duration from milliseconds: "0s", "45s", "2m 14s", "1h 03m".
+  function fmtDur(ms){
+    if(ms==null || isNaN(ms) || ms<0) return '—';
+    const s=Math.floor(ms/1000);
+    if(s<60) return s+'s';
+    const m=Math.floor(s/60), ss=s%60;
+    if(m<60) return m+'m '+String(ss).padStart(2,'0')+'s';
+    const h=Math.floor(m/60), mm=m%60;
+    return h+'h '+String(mm).padStart(2,'0')+'m';
+  }
 
   async function post(url){ await fetch(url,{method:'POST'}); }
   function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
@@ -414,24 +445,45 @@
       detailItems += `<div class="dsub">＋ Added since top of queue</div>` + added.map(groupHtml).join('');
     }
     const detailOrds = `<div class="dord">Full order number${e.orderIds.length>1?'s':''}: ${e.orderIds.map(id=>'#'+esc(id)).join('  ')}</div>`;
+    // Admin-only buyer cross-check: @handle plus the TikTok display name when it
+    // differs. Never shown on the public page.
+    const who = `<div class="dwho">Handle: <b>${esc(e.buyer||'')}</b>`
+      + (e.buyerDisplay ? ` &nbsp;·&nbsp; Display name: <b>${esc(e.buyerDisplay)}</b>` : '')
+      + `</div>`;
     return `<div class="slotmain">`
       + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
       + `<div class="pos">${e.position}</div>`
       + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
-      + `<div class="items">${esc(itemStr)}</div></div>`
+      + `<div class="items">${esc(itemStr)}</div>`
+      + `<div class="qtime"><span class="qtimer" data-since="${e.firstOrderAt||''}" data-top="${e.reachedTopAt||''}"></span></div></div>`
       + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
       + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<div class="money">${money(e.total)}</div>`
       + `<div class="actions">${(e.bumped||e.position===1)?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
       + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`
       + `</div>`
-      + `<div class="details">${detailItems}${detailOrds}</div>`;
+      + `<div class="details">${detailItems}${who}${detailOrds}</div>`;
   }
   function slotSig(e){
-    return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
+    return [e.position,e.buyer,e.buyerDisplay||'',e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
       e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e._dupName?1:0,e._idTag||'',
+      e.firstOrderAt||'',e.reachedTopAt||'',
       e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
   }
+  // Tick every live slot's timer text in place (no re-render, so it never fights
+  // the diff). "In queue" = since first order; "at top" = since it hit #1.
+  function tickTimers(){
+    const now = Date.now();
+    document.querySelectorAll('.qtimer').forEach(el=>{
+      const since = Number(el.dataset.since)||0;
+      const top = Number(el.dataset.top)||0;
+      if(!since){ el.textContent=''; return; }
+      let html = '⏱ in queue '+fmtDur(now-since);
+      if(top) html += ' &nbsp;·&nbsp; <span class="qtop">at top '+fmtDur(now-top)+'</span>';
+      el.innerHTML = html;
+    });
+  }
+  setInterval(tickTimers, 1000);
   function renderQueue(){
     const filter = (document.getElementById('search').value||'').toLowerCase();
     // Detect buyers who share an identical display name with ANOTHER buyer in
@@ -477,6 +529,44 @@
     for(const [key,node] of slotNodes){ if(!seen.has(key)){ node.remove(); slotNodes.delete(key); expandedKeys.delete(key); } }
   }
 
+  // Per-variant counter card. Rebuild the structure only when the variant
+  // DEFINITIONS change; otherwise update counts in place and never overwrite a
+  // field the operator is currently editing.
+  function renderVariantsAdmin(){
+    const box = document.getElementById('variants-admin');
+    const vs = state.variants || [];
+    if(!vs.length){ box.innerHTML=''; box._sig=''; return; }
+    const sig = vs.map(v=>v.id+':'+v.label).join('|');
+    if(box._sig !== sig){
+      box._sig = sig;
+      box.innerHTML = `<div class="vcard"><h3>📊 Bundle variant counters</h3>
+        <p class="vsub">Adds +1 per unit when an order reaches the top of the queue. Shown on the public page. Resets each stream. Edit a number and Save to correct it.</p>
+        ${vs.map(v=>`<div class="vrow" data-id="${esc(v.id)}">
+          <span class="vlab">${esc(v.label)}</span>
+          <input type="number" min="0" class="vin" value="${Number(v.count)||0}" />
+          <button class="vsave" onclick="saveVariant('${esc(v.id)}', this)">Save</button>
+        </div>`).join('')}</div>`;
+    } else {
+      vs.forEach(v=>{
+        const row = box.querySelector('.vrow[data-id="'+String(v.id).replace(/"/g,'\\"')+'"]');
+        if(!row) return;
+        const input = row.querySelector('.vin');
+        if(input && document.activeElement !== input) input.value = Number(v.count)||0;
+      });
+    }
+  }
+  async function saveVariant(id, btn){
+    const row = btn.closest('.vrow');
+    const val = Math.max(0, Math.floor(Number(row.querySelector('.vin').value)||0));
+    try{
+      await fetch('/api/variant-count/'+encodeURIComponent(id), {
+        method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({count:val})
+      });
+      btn.classList.add('saved'); btn.textContent='Saved ✓';
+      setTimeout(()=>{ btn.classList.remove('saved'); btn.textContent='Save'; }, 1200);
+    }catch{ alert("Couldn't save that count — check your connection and try again."); }
+  }
+
   function render(){
     const st = state.stats||{};
     const live = !!st.live;
@@ -493,6 +583,8 @@
     document.getElementById('s-pri').textContent = st.priorityCount||0;
     document.getElementById('s-val').textContent = money(st.activeValue);
     document.getElementById('s-done').textContent = st.fulfilledCount||0;
+    document.getElementById('s-avgq').textContent = fmtDur(st.avgTimeInQueueMs);
+    document.getElementById('s-avgt').textContent = fmtDur(st.avgFulfillmentMs);
 
     const chips = document.getElementById('pri-chips');
     const chipSig = (state.config.priorityItems||[]).join('|');
@@ -502,6 +594,8 @@
     }
 
     renderQueue();
+    tickTimers();
+    renderVariantsAdmin();
 
     const fEl = document.getElementById('fulfilled');
     const f = state.fulfilled||[];

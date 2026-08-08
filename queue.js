@@ -40,11 +40,14 @@ export class QueueEngine extends EventEmitter {
     this.openBatch = new Map(); // buyerId -> current open batchKey (or absent)
     this.batchCounter = 0;
     this.priorityItems = []; // array of lowercased substrings that trigger priority
+    this.trackedVariants = []; // [{ id, label, product, variant }] — per-variant sales counters
+    this.variantCounts = {}; // { [variantId]: number } — units counted when a slot hits the top
     this.live = false; // when false, incoming orders are ignored (not queued)
     this.sessionStartedAt = null; // when the current live started
     this.history = []; // archived past streams (most recent first)
     this._ensureDataDir();
     this._load();
+    this._seedFromEnv();
   }
 
   _ensureDataDir() {
@@ -56,6 +59,8 @@ export class QueueEngine extends EventEmitter {
       if (fs.existsSync(CONFIG_FILE)) {
         const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
         this.priorityItems = (cfg.priorityItems || []).map((s) => s.toLowerCase());
+        this.trackedVariants = Array.isArray(cfg.trackedVariants) ? cfg.trackedVariants : [];
+        this.variantCounts = (cfg.variantCounts && typeof cfg.variantCounts === 'object') ? cfg.variantCounts : {};
         this.batchCounter = cfg.batchCounter || 0;
         this.live = !!cfg.live;
         this.sessionStartedAt = cfg.sessionStartedAt || null;
@@ -85,6 +90,112 @@ export class QueueEngine extends EventEmitter {
     }
   }
 
+  /**
+   * Per-store configuration lives in env vars so BOTH stores can run the exact
+   * same code. Idempotent and safe to run every boot:
+   *  - PRIORITY_ITEMS_EXTRA: comma/newline list of item substrings that should
+   *    ALWAYS trigger priority (unioned in, never removes existing).
+   *  - TRACKED_VARIANTS: JSON array of { id, label, product, variant } — the
+   *    per-variant counters. Only the DEFINITIONS are seeded; live counts in
+   *    variantCounts are never touched here.
+   */
+  _seedFromEnv() {
+    try {
+      const extra = String(process.env.PRIORITY_ITEMS_EXTRA || '')
+        .split(/[\n,]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      if (extra.length) {
+        const set = new Set(this.priorityItems);
+        for (const p of extra) set.add(p);
+        this.priorityItems = [...set];
+      }
+    } catch (e) { console.warn('[queue] PRIORITY_ITEMS_EXTRA seed failed:', e.message); }
+    try {
+      if (process.env.TRACKED_VARIANTS) {
+        const defs = JSON.parse(process.env.TRACKED_VARIANTS);
+        if (Array.isArray(defs)) {
+          const byId = new Map(this.trackedVariants.map((v) => [v.id, v]));
+          for (const d of defs) {
+            if (!d || d.id == null) continue;
+            byId.set(String(d.id), {
+              id: String(d.id),
+              label: String(d.label || d.id),
+              product: String(d.product || ''),
+              variant: String(d.variant || ''),
+            });
+          }
+          this.trackedVariants = [...byId.values()];
+        }
+      }
+    } catch (e) { console.warn('[queue] TRACKED_VARIANTS seed failed:', e.message); }
+    // Recompute priority flags in case the env extras changed matching, then save.
+    for (const o of this.orders.values()) o.hasPriority = this._isPriorityOrder(o.items);
+    this._persist();
+  }
+
+  /** Stamp the current top slot's orders with reachedTopAt (once each) and tally
+   *  any tracked-variant units they contain. Called after every queue mutation
+   *  so "reached the top" is detected no matter what caused the reorder. */
+  _markTopReached() {
+    const top = this.activeQueue()[0];
+    if (!top) return false;
+    const orders = [...this.orders.values()].filter(
+      (o) => o.batchKey === top.key && o.status === 'queued' && !o.reachedTopAt
+    );
+    if (!orders.length) return false;
+    const now = Date.now();
+    for (const o of orders) {
+      o.reachedTopAt = now;
+      this._tallyVariants(o);
+    }
+    return true;
+  }
+
+  /** Add an order's units to any matching tracked-variant counters. Matches on
+   *  the item name/SKU text: requires the variant substring, and (if set) the
+   *  product substring too, so a short variant token can't match unrelated items. */
+  _tallyVariants(order) {
+    if (!this.trackedVariants.length) return;
+    for (const it of (order.items || [])) {
+      const text = `${it.name || ''} ${it.sku || ''}`.toLowerCase();
+      const qty = it.qty || 1;
+      for (const v of this.trackedVariants) {
+        const prod = (v.product || '').toLowerCase();
+        const varn = (v.variant || '').toLowerCase();
+        if (!varn) continue;
+        if ((!prod || text.includes(prod)) && text.includes(varn)) {
+          this.variantCounts[v.id] = (this.variantCounts[v.id] || 0) + qty;
+        }
+      }
+    }
+  }
+
+  /** Replace the tracked-variant DEFINITIONS (admin editor). Preserves the live
+   *  count for any id that still exists; drops counts for removed ids. */
+  setTrackedVariants(list) {
+    const defs = (Array.isArray(list) ? list : []).filter((d) => d && d.id != null).map((d) => ({
+      id: String(d.id),
+      label: String(d.label || d.id),
+      product: String(d.product || ''),
+      variant: String(d.variant || ''),
+    }));
+    this.trackedVariants = defs;
+    const keep = {};
+    for (const d of defs) keep[d.id] = this.variantCounts[d.id] || 0;
+    this.variantCounts = keep;
+    this._persist();
+    this.emit('change', { reason: 'variants-config' });
+  }
+
+  /** Manually set one variant's counter (admin correction). */
+  setVariantCount(id, n) {
+    const key = String(id);
+    if (!this.trackedVariants.some((v) => v.id === key)) return false;
+    this.variantCounts[key] = Math.max(0, Math.floor(Number(n) || 0));
+    this._persist();
+    this.emit('change', { reason: 'variant-count', id: key });
+    return true;
+  }
+
   _persist() {
     try {
       fs.writeFileSync(STATE_FILE, JSON.stringify([...this.orders.values()]));
@@ -92,6 +203,8 @@ export class QueueEngine extends EventEmitter {
         CONFIG_FILE,
         JSON.stringify({
           priorityItems: this.priorityItems,
+          trackedVariants: this.trackedVariants,
+          variantCounts: this.variantCounts,
           batchCounter: this.batchCounter,
           live: this.live,
           sessionStartedAt: this.sessionStartedAt,
@@ -220,6 +333,7 @@ export class QueueEngine extends EventEmitter {
       id,
       buyerId,
       buyer: raw.buyer || 'Buyer',
+      buyerDisplay: raw.buyerDisplay || '',
       items,
       total: Number(raw.total || 0),
       createdAt: raw.createdAt || Date.now(),
@@ -231,6 +345,7 @@ export class QueueEngine extends EventEmitter {
       onHold: !!raw.onHold,
     };
     this.orders.set(id, order);
+    this._markTopReached();
     this._persist();
 
     const entry = this._entryFor(batchKey);
@@ -268,10 +383,14 @@ export class QueueEngine extends EventEmitter {
     }
     const items = [...itemMap.entries()].map(([name, qty]) => ({ name, qty }));
 
+    const reachedAts = orders.map((o) => o.reachedTopAt).filter(Boolean);
     return {
       key: batchKey,
       buyerId: first.buyerId,
       buyer: first.buyer,
+      // Admin-only cross-check: the buyer's TikTok display name (may differ from
+      // the @handle). Never surfaced on the public view.
+      buyerDisplay: first.buyerDisplay || '',
       orderIds: orders.map((o) => o.id),
       orderCount: orders.length,
       // Per-order breakdown (oldest first) so the panel can group the expanded
@@ -297,6 +416,9 @@ export class QueueEngine extends EventEmitter {
         orders.flatMap((o) => o.items.filter((it) => this._isPriorityOrder([it])).map((it) => it.name))
       )],
       firstOrderAt: first.createdAt,
+      // When this slot first reached the top of the queue (drives the "time at
+      // top" live timer and the fulfillment-time metric). null until it hits #1.
+      reachedTopAt: reachedAts.length ? Math.min(...reachedAts) : null,
       priorityAt,
       bumped: !!first.bumped,
       priorFulfilled,
@@ -326,6 +448,7 @@ export class QueueEngine extends EventEmitter {
       o.bumped = false;
     }
     if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
+    this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'fulfilled', batchKey, buyerId });
     return { batchKey, buyerId };
@@ -342,6 +465,7 @@ export class QueueEngine extends EventEmitter {
       o.fulfilledAt = null;
     }
     this.openBatch.set(buyerId, batchKey);
+    this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'reopened', batchKey });
     return { batchKey };
@@ -359,6 +483,7 @@ export class QueueEngine extends EventEmitter {
       }
     }
     if (!found) return null;
+    this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'bumped', batchKey });
     return { batchKey };
@@ -372,6 +497,7 @@ export class QueueEngine extends EventEmitter {
     for (const o of this.orders.values()) {
       o.hasPriority = this._isPriorityOrder(o.items);
     }
+    this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'priority-config', priorityItems: this.priorityItems });
   }
@@ -405,6 +531,8 @@ export class QueueEngine extends EventEmitter {
     this._archiveCurrentStream(); // safety net if the previous stream wasn't ended
     this.orders.clear();
     this.openBatch.clear();
+    // Per-variant counters are a per-stream tally — reset them for the new stream.
+    for (const k of Object.keys(this.variantCounts)) this.variantCounts[k] = 0;
     this.sessionStartedAt = Date.now();
     this.live = true;
     this._persist();
@@ -453,6 +581,7 @@ export class QueueEngine extends EventEmitter {
     }
     const slots = [...byBatch.entries()].map(([key, orders]) => {
       const first = orders[0];
+      const reachedAts = orders.map((o) => o.reachedTopAt).filter(Boolean);
       return {
         key,
         buyer: first.buyer,
@@ -461,6 +590,9 @@ export class QueueEngine extends EventEmitter {
         itemCount: orders.reduce((n, o) => n + o.items.reduce((m, i) => m + (i.qty || 1), 0), 0),
         total: orders.reduce((s, o) => s + o.total, 0),
         fulfilledAt: Math.max(...orders.map((o) => o.fulfilledAt || 0)),
+        // Timing fields for the queue metrics.
+        firstOrderAt: Math.min(...orders.map((o) => o.createdAt || o.fulfilledAt || 0)),
+        reachedTopAt: reachedAts.length ? Math.min(...reachedAts) : null,
       };
     });
     slots.sort((a, b) => b.fulfilledAt - a.fulfilledAt);
@@ -469,13 +601,27 @@ export class QueueEngine extends EventEmitter {
 
   stats() {
     const active = this.activeQueue();
+    const done = this.fulfilledSlots();
+    // Average time-in-queue (placed -> fulfilled) and fulfillment time (reached
+    // top -> fulfilled) across everything fulfilled this stream.
+    const inQueue = done
+      .map((s) => (s.fulfilledAt && s.firstOrderAt) ? s.fulfilledAt - s.firstOrderAt : null)
+      .filter((v) => v != null && v >= 0);
+    const atTop = done
+      .map((s) => (s.fulfilledAt && s.reachedTopAt) ? s.fulfilledAt - s.reachedTopAt : null)
+      .filter((v) => v != null && v >= 0);
+    const avg = (a) => (a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null);
     return {
       activeCount: active.length,
       priorityCount: active.filter((e) => e.isPriority).length,
-      fulfilledCount: this.fulfilledSlots().length,
+      fulfilledCount: done.length,
       activeValue: active.reduce((s, e) => s + e.total, 0),
       priorityItems: this.priorityItems,
       live: this.live,
+      // Queue timing metrics (admin only). Milliseconds; null when no data yet.
+      avgTimeInQueueMs: avg(inQueue),
+      avgFulfillmentMs: avg(atTop),
+      timedCount: inQueue.length,
     };
   }
 
@@ -486,6 +632,10 @@ export class QueueEngine extends EventEmitter {
       cancelled: this.cancelledSlots().slice(0, 50),
       stats: this.stats(),
       config: { priorityItems: this.priorityItems },
+      variants: this.trackedVariants.map((v) => ({
+        id: v.id, label: v.label, product: v.product, variant: v.variant,
+        count: this.variantCounts[v.id] || 0,
+      })),
       history: this.history.map((s) => ({
         id: s.id,
         startedAt: s.startedAt,
@@ -516,6 +666,7 @@ export class QueueEngine extends EventEmitter {
     const now = Date.now();
     for (const o of orders) { o.status = 'cancelled'; o.cancelledAt = now; o.bumped = false; }
     if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
+    this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'cancelled', batchKey });
     return { batchKey };
@@ -535,6 +686,7 @@ export class QueueEngine extends EventEmitter {
       (x) => x.batchKey === o.batchKey && x.status === 'queued'
     );
     if (!stillOpen && this.openBatch.get(o.buyerId) === o.batchKey) this.openBatch.delete(o.buyerId);
+    this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'cancelled', orderId: String(orderId) });
     return o;

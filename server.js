@@ -17,7 +17,7 @@ import { Server as IOServer } from 'socket.io';
 import { authenticator } from 'otplib';
 
 import { QueueEngine } from './queue.js';
-import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, debugShops, refetchShopCipher, debugRawOrder, debugCancellations } from './tiktok.js';
+import { tiktokEnabled, mountAuth, startPolling, tiktokBoot, tiktokStatus, tiktokTokensForEnv, debugShops, refetchShopCipher, debugRawOrder, debugCancellations } from './tiktok.js';
 import { startDiscord, discordEnabled } from './discord.js';
 import { startSimulator } from './simulator.js';
 
@@ -133,6 +133,9 @@ function publicView() {
       activeCount: live ? snap.stats.activeCount : 0,
       priorityCount: live ? snap.stats.priorityCount : 0,
     },
+    // Per-variant sales counters (public tally). Empty on stores that don't
+    // configure any, so the public page simply renders nothing.
+    variants: (snap.variants || []).map((v) => ({ id: v.id, label: v.label, count: v.count })),
   };
 }
 
@@ -180,12 +183,6 @@ app.get('/guide', (req, res) => {
   if (guideAuthed(req)) return res.type('html').send(fs.readFileSync(path.join(__dirname, 'guide.html'), 'utf8'));
   res.type('html').send(guideLogin(req.query.e === '1'));
 });
-// Interactive, self-contained practice sandbox (fake data, no backend). Behind the
-// same guide gate; admins pass through. Nothing here touches the real queue.
-app.get('/sandbox', (req, res) => {
-  if (guideAuthed(req)) return res.type('html').send(fs.readFileSync(path.join(__dirname, 'sandbox.html'), 'utf8'));
-  res.redirect('/guide');
-});
 app.post('/guide/login', (req, res) => {
   const pw = (req.body && req.body.password) || '';
   const ok = GUIDE_PASSWORD && pw.length === GUIDE_PASSWORD.length &&
@@ -227,16 +224,24 @@ app.post('/api/priority-items', requireAuth, (req, res) => {
   res.json({ ok: true, priorityItems: queue.priorityItems });
 });
 app.post('/api/reset', requireAuth, (_req, res) => { queue.reset(); res.json({ ok: true }); });
+// Per-variant counters: replace the tracked-variant definitions, or manually
+// correct a single counter. Both admin only.
+app.post('/api/variants', requireAuth, (req, res) => {
+  queue.setTrackedVariants(req.body.variants || []);
+  res.json({ ok: true, variants: queue.trackedVariants, variantCounts: queue.variantCounts });
+});
+app.post('/api/variant-count/:id', requireAuth, (req, res) => {
+  const ok = queue.setVariantCount(req.params.id, req.body.count);
+  res.json({ ok, variantCounts: queue.variantCounts });
+});
 app.post('/api/remove/:key', requireAuth, (req, res) => res.json({ ok: !!queue.removeSlot(req.params.key) }));
 
 // Inject a synthetic order for testing label printing / the panel. Admin only.
-// Optional query: ?buyer=name&n=1&item=Test%20Pack&total=9.99&buyerId=custom&qty=1
+// Optional query: ?buyer=name&n=1&item=Test%20Pack&total=9.99&buyerId=custom
 // buyerId lets you simulate two DIFFERENT buyers who share a display name.
-// qty sets the quantity of the item WITHIN a single order (e.g. qty=5 = "5× pack").
 app.post('/api/test-order', requireAuth, (req, res) => {
   const buyer = (req.query.buyer && String(req.query.buyer).slice(0, 40)) || 'test_buyer';
   const n = Math.max(1, Math.min(Number(req.query.n) || 1, 5));
-  const qty = Math.max(1, Math.min(Number(req.query.qty) || 1, 99));
   const itemName = (req.query.item && String(req.query.item).slice(0, 60)) || 'Test Booster Pack';
   const buyerId = (req.query.buyerId && String(req.query.buyerId).slice(0, 40)) ||
     ('TESTBUYER-' + buyer.toLowerCase().replace(/[^a-z0-9]/g, ''));
@@ -249,7 +254,7 @@ app.post('/api/test-order', requireAuth, (req, res) => {
       id,
       buyerId,
       buyer,
-      items: [{ name: itemName, qty }],
+      items: [{ name: itemName, qty: 1 }],
       total,
       createdAt: Date.now() + i,
       onHold,
@@ -399,6 +404,8 @@ app.get('/api/export/:id', requireAuth, (req, res) => {
 // ---------- TikTok Shop ingest ----------
 mountAuth(app, ADMIN); // /auth/tiktok/callback (Redirect URL target)
 app.get('/api/tiktok-status', requireAuth, (_req, res) => res.json(tiktokStatus()));
+// Admin only: reveal current live tokens to pin into Render env (persistence across spin-downs).
+app.get('/api/tiktok-tokens', requireAuth, (_req, res) => res.json(tiktokTokensForEnv()));
 // Debug: inspect the raw shops-endpoint response (admin only).
 app.get('/api/tiktok-debug', requireAuth, async (_req, res) => {
   try { res.json(await debugShops()); }
