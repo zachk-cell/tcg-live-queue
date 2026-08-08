@@ -213,11 +213,27 @@ function maskedBuyerLabel(o) {
 
 export function normalizeOrder(o) {
   const lineItems = o.line_items || o.item_list || [];
-  const items = lineItems.map((li) => ({
-    name: li.product_name || li.sku_name || 'Item',
-    sku: li.seller_sku || li.sku_id || '',
-    qty: li.quantity || 1,
-  }));
+  const items = lineItems.map((li) => {
+    const product = li.product_name || '';
+    // TikTok records the buyer's chosen variation/sub-variant in a SEPARATE field
+    // from the product title (e.g. product "Piggy Bank Booster Pack Bundle",
+    // variant "Ascended Heroes"; or product "$299 Mystery Bag", variant "Rip
+    // Live"). Capture it and fold it into the display name so it (a) shows in the
+    // queue for the packer and (b) is available for priority + variant-counter
+    // matching, which key off the item name/SKU text.
+    const variant = li.sku_name || li.variation_name || li.variation ||
+      (li.sku && (li.sku.name || li.sku.sku_name)) || '';
+    const base = product || li.sku_name || 'Item';
+    const name = (variant && !base.toLowerCase().includes(String(variant).toLowerCase()))
+      ? `${base} - ${variant}`
+      : base;
+    return {
+      name,
+      sku: li.seller_sku || li.sku_id || '',
+      variant: variant || '',
+      qty: li.quantity || 1,
+    };
+  });
   const handle = pickHandle(o);
   const display = pickDisplayName(o);
   return {
