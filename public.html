@@ -32,25 +32,36 @@
   .count{margin-left:auto;font-size:12px;color:var(--muted)}
   .empty{color:var(--muted);text-align:center;padding:48px 20px;border:1px dashed var(--line);border-radius:12px}
   .note{font-size:11px;color:var(--muted);text-align:center;margin-top:18px}
-  .brand{text-align:center;color:var(--muted);font-size:11px;letter-spacing:.3px;padding:16px 20px 30px;
-    border-top:1px solid var(--line);margin-top:10px;opacity:.8}
+  .brand{text-align:center;color:var(--muted);font-size:14px;letter-spacing:.2px;padding:18px 20px 32px;
+    border-top:1px solid var(--line);margin-top:10px;opacity:.95}
   .brand b{color:var(--text);font-weight:700}
-  .tally{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-bottom:16px}
-  .tally h2{font-size:13px;margin:0 0 10px;color:var(--muted);font-weight:700;letter-spacing:.4px;text-transform:uppercase}
-  .tally .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px}
-  .vchip{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:2px}
-  .vchip .vl{font-size:12px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .vchip .vn{font-size:22px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--pri)}
+  /* Piggy Bank Tracker — lives IN the header. On wide screens it pins to the
+     right of the header while the title stays centered; on narrower screens it
+     drops just below the title, still inside the header (so it sits above the
+     queue on phones). */
+  #variants{margin-top:10px}
+  .tally{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap}
+  .tally h2{font-size:11px;margin:0;color:var(--muted);font-weight:700;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap}
+  .tally .grid{display:flex;flex-wrap:wrap;justify-content:center;gap:6px}
+  .vchip{display:flex;align-items:baseline;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:4px 9px}
+  .vchip .vl{font-size:11px;color:var(--muted);white-space:nowrap}
+  .vchip .vn{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--pri)}
+  @media (min-width:1650px){
+    #variants{position:absolute;right:20px;top:50%;transform:translateY(-50%);margin:0}
+    .tally{flex-wrap:nowrap}
+    .tally h2{display:none}
+    .tally .grid{flex-wrap:nowrap}
+  }
 </style>
 </head>
 <body>
 <header>
   <h1><span id="dot" class="dot"></span>PBCC Live Queue</h1>
   <div class="sub" id="sub">Waiting for the live to start…</div>
+  <div id="variants"></div>
 </header>
 <main>
   <input id="find" class="find" placeholder="Type your username to highlight your spot…" oninput="render()" />
-  <div id="variants"></div>
   <div id="list"></div>
   <div class="note">Order totals and personal details are private and never shown here.</div>
 </main>
@@ -66,7 +77,7 @@
     const box = document.getElementById('variants');
     const vs = state.variants || [];
     if(!vs.length){ box.innerHTML = ''; return; }
-    box.innerHTML = `<div class="tally"><h2>📊 Pulled so far this stream</h2><div class="grid">${
+    box.innerHTML = `<div class="tally"><h2>Piggy Bank Tracker</h2><div class="grid">${
       vs.map(v=>`<div class="vchip"><span class="vl">${esc(v.label)}</span><span class="vn">${Number(v.count)||0}</span></div>`).join('')
     }</div></div>`;
   }
