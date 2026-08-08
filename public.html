@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>PBCC Live Queue</title>
+<title>Poke Pig Live Queue</title>
 <script src="/socket.io/socket.io.js"></script>
 <style>
   :root{--bg:#0f1115;--panel:#171a21;--panel2:#1d212b;--line:#272c38;--text:#e8ebf2;
@@ -35,28 +35,24 @@
   .brand{text-align:center;color:var(--muted);font-size:14px;letter-spacing:.2px;padding:18px 20px 32px;
     border-top:1px solid var(--line);margin-top:10px;opacity:.95}
   .brand b{color:var(--text);font-weight:700}
+  .brand a{color:inherit;text-decoration:none}
+  .brand a:hover b{color:var(--hi);text-decoration:underline}
   /* Piggy Bank Tracker — lives IN the header. On wide screens it pins to the
      right of the header while the title stays centered; on narrower screens it
      drops just below the title, still inside the header (so it sits above the
      queue on phones). */
-  #variants{margin-top:10px}
-  .tally{display:flex;align-items:center;justify-content:center;gap:10px;flex-wrap:wrap}
-  .tally h2{font-size:11px;margin:0;color:var(--muted);font-weight:700;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap}
-  .tally .grid{display:flex;flex-wrap:wrap;justify-content:center;gap:6px}
-  .vchip{display:flex;align-items:baseline;gap:6px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:4px 9px}
-  .vchip .vl{font-size:11px;color:var(--muted);white-space:nowrap}
-  .vchip .vn{font-size:15px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--pri)}
-  @media (min-width:1650px){
-    #variants{position:absolute;right:20px;top:50%;transform:translateY(-50%);margin:0}
-    .tally{flex-wrap:nowrap}
-    .tally h2{display:none}
-    .tally .grid{flex-wrap:nowrap}
-  }
+  #variants{margin-top:8px;width:100%}
+  .tally{display:flex;flex-direction:column;align-items:center;gap:8px}
+  .tally h2{font-size:12px;margin:0;color:var(--muted);font-weight:700;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;text-align:center}
+  .tally .grid{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
+  .vchip{display:flex;align-items:baseline;gap:7px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:6px 12px}
+  .vchip .vl{font-size:13px;color:var(--muted);white-space:nowrap}
+  .vchip .vn{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--pri)}
 </style>
 </head>
 <body>
 <header>
-  <h1><span id="dot" class="dot"></span>PBCC Live Queue</h1>
+  <h1><span id="dot" class="dot"></span>Poke Pig Live Queue</h1>
   <div class="sub" id="sub">Waiting for the live to start…</div>
   <div id="variants"></div>
 </header>
@@ -65,7 +61,7 @@
   <div id="list"></div>
   <div class="note">Order totals and personal details are private and never shown here.</div>
 </main>
-<footer class="brand">Queue built by <b>Palm Beach Card Co</b> (Zach Rips)</footer>
+<footer class="brand">Queue built by <a href="https://www.tiktok.com/@palmbeachcardco" target="_blank" rel="noopener noreferrer"><b>Palm Beach Card Co</b></a> (Zach Rips)</footer>
 <script>
   const socket = io('/public');
   let state = { queue: [], stats: {} };
