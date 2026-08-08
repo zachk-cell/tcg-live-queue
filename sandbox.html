@@ -121,7 +121,7 @@
 </head>
 <body>
 <header>
-  <h1><span id="dot" class="dot"></span>PBCC Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span> <span class="demopill">🧪 SANDBOX</span></h1>
+  <h1><span id="dot" class="dot"></span>Poke Pig Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span> <span class="demopill">🧪 SANDBOX</span></h1>
   <a href="/guide" class="hdr-link hdr-logout">← Back to guide</a>
   <div class="stats">
     <div class="stat"><b id="s-active">0</b><span>In queue</span></div>
@@ -138,9 +138,9 @@
     <div class="btns">
       <button class="key" onclick="loadSample()">▶ Load a sample board</button>
       <button onclick="addNormal()">＋ Add order</button>
-      <button onclick="addPriority()">⭐ Add priority (break)</button>
+      <button onclick="addPriority()">⭐ Add priority (mystery bag)</button>
       <button onclick="addRepeatTop()">🔁 Add repeat for #1</button>
-      <button onclick="addQtyOrder()">×5 Add a 5-quantity order</button>
+      <button onclick="addQtyOrder()">×5 Add a 5-quantity bundle order</button>
       <button onclick="addSameName()">👥 Add same-name buyer</button>
       <button onclick="addHold()">⚠ Add cancel-request</button>
       <button class="clr" onclick="clearAll()">Clear the board</button>
@@ -197,7 +197,7 @@
   // ---------------- In-browser mock engine (no server) ----------------
   let state = { queue: [], fulfilled: [], cancelled: [], stats: {}, config: { priorityItems: [] } };
   let live = false;
-  let priorityItems = ['break','slab'];
+  let priorityItems = ['legendary collection','1st edition base set','god tier mystery bag','alien tier mystery bag'];
   let bumpedBuyerId = null;
   let tick = 1, idc = 1;
   const orders = [];        // active orders
@@ -425,40 +425,45 @@
   }
 
   // ---------------- Demo data generators ----------------
-  const BUYERS=['cardfiend','ripnship','mtg_maria','pokedad','slabqueen','holo_hunter','binderbabe','topdeck_tom','chaserchloe','fatpackfrank'];
-  const NORMAL=['Pokemon 151 pack','Lorcana booster','One Piece OP-05 pack','Bulk common lot','Prizm Football pack','Topps Chrome pack'];
-  const PRItems=['BREAK slot: PSA 10 break','Graded SLAB: PSA 9 Pikachu','Box BREAK: vintage'];
+  const BUYERS=['pokedad','holo_hunter','pikapapi','charizard_carl','piggybankpro','ripqueen','binderbabe','tjcardsfan','chaserchloe','elite_trainer'];
+  const NORMAL=['Pokémon 151 Booster Pack','Prismatic Evolutions Booster Pack','Surging Sparks Booster Pack','Piggy Bank Booster Pack Bundle - 151','Piggy Bank Booster Pack Bundle - White Flare','Piggy Bank Booster Pack Bundle - Black Bolt'];
+  const PRItems=['Legendary Collection Booster Pack','(Guaranteed Holo) 1st Edition Base Set Booster Pack','TJ Cardshop x PokePig God Tier Mystery Bag','TJ Cardshop x PokePig Alien Tier Mystery Bag'];
   let bi=0;
   function nextBuyer(){ const b=BUYERS[bi%BUYERS.length]; bi++; return {buyer:b, buyerId:'B-'+b+'-'+bi}; }
   function pick(a){ return a[Math.floor((tick*7+idc*3)%a.length)]; }
   function addNormal(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:pick(NORMAL),qty:1}], 5+(tick%25)); }
   function addPriority(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:pick(PRItems),qty:1}], 60+(tick%60)); }
-  function addQtyOrder(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:'Pokemon 151 pack',qty:5}], 25); }
-  function addRepeatTop(){ const top=(state.queue||[])[0]; if(!top){ alert('Add an order first, then this adds another for whoever is #1.'); return; } pushOrder(top.buyer, top.buyerId, [{name:'BREAK add-on: extra spot',qty:1}], 15); }
+  function addQtyOrder(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:'Piggy Bank Booster Pack Bundle - White Flare',qty:5}], 25); }
+  function addRepeatTop(){ const top=(state.queue||[])[0]; if(!top){ alert('Add an order first, then this adds another for whoever is #1.'); return; } pushOrder(top.buyer, top.buyerId, [{name:'Piggy Bank Booster Pack Bundle - Prismatic',qty:1}], 15); }
   function addSameName(){ const existing=(state.queue||[]).find(e=>!e._twin); const nm= existing?existing.buyer:'cardfiend'; if(!live) live=true; pushOrder(nm,'B-twin-'+(idc), [{name:pick(NORMAL),qty:1}], 12); }
   function addHold(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:pick(NORMAL),qty:1}], 20, true); }
   function clearAll(){ orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; commit(); }
 
   function loadSample(){
-    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; live=true; priorityItems=['break','slab'];
-    // earlier-today: fulfill an Alex order first
-    pushOrder('Alex','B-alex',[{name:'Prizm Football pack',qty:1}],18); fulfill('B-alex');
-    // Frosty priority + added more (while #1)
-    pushOrder('Frosty','B-frosty',[{name:'BREAK slot: PSA 10 break',qty:1}],120);
-    pushOrder('Frosty','B-frosty',[{name:'BREAK add-on: extra spot',qty:1}],45);
-    pushOrder('Frosty','B-frosty',[{name:'BREAK add-on: extra spot',qty:1}],45);
-    pushOrder('SlabKing','B-slab',[{name:'Graded SLAB: PSA 9 Pikachu',qty:1}],85);
-    // merge with quantities
-    pushOrder('Jessie','B-jess',[{name:'Pokemon 151 pack',qty:1}],24);
-    pushOrder('Jessie','B-jess',[{name:'Lorcana booster',qty:1}],9);
-    pushOrder('bulkbuyer','B-bulk',[{name:'Pokemon 151 pack',qty:5}],25);
-    pushOrder('Alex','B-alex',[{name:'Topps Chrome pack',qty:1}],15); // returns -> earlier today
-    pushOrder('Javier','B-jav1',[{name:'Bulk common lot',qty:1}],10);
-    pushOrder('Javier','B-jav2',[{name:'Prizm Football pack',qty:1}],12); // same name
-    pushOrder('CancelMe','B-cxl',[{name:'One Piece OP-05 pack',qty:1}],22,true); // hold
-    pushOrder('jjcreel3789','B-jj',[{name:'Pokemon 151 pack',qty:1}],24);
+    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; live=true;
+    priorityItems=['legendary collection','1st edition base set','god tier mystery bag','alien tier mystery bag'];
+    // earlier-today: fulfill a pokedad order first, so his later order flags "earlier today"
+    pushOrder('pokedad','B-pokedad',[{name:'Pokémon 151 Booster Pack',qty:1}],18); fulfill('B-pokedad');
+    // Priority (Alien Tier Mystery Bag) jumps to #1, then adds more Piggy Bank bundles while #1
+    pushOrder('holo_hunter','B-holo',[{name:'TJ Cardshop x PokePig Alien Tier Mystery Bag',qty:1}],120);
+    pushOrder('holo_hunter','B-holo',[{name:'Piggy Bank Booster Pack Bundle - Ascended Heroes',qty:2}],90);
+    pushOrder('holo_hunter','B-holo',[{name:'Piggy Bank Booster Pack Bundle - Prismatic',qty:1}],45);
+    // second priority (God Tier) sits just below
+    pushOrder('elite_trainer','B-elite',[{name:'TJ Cardshop x PokePig God Tier Mystery Bag',qty:1}],85);
+    // merge with quantities (two different bundles in one bag)
+    pushOrder('charizard_carl','B-carl',[{name:'Pokémon 151 Booster Pack',qty:1}],24);
+    pushOrder('charizard_carl','B-carl',[{name:'Prismatic Evolutions Booster Pack',qty:1}],12);
+    // a big-quantity bundle order
+    pushOrder('binderbabe','B-binder',[{name:'Piggy Bank Booster Pack Bundle - White Flare',qty:5}],95);
+    pushOrder('pokedad','B-pokedad',[{name:'Surging Sparks Booster Pack',qty:1}],15); // returns -> earlier today
+    // same display name, two different accounts
+    pushOrder('tjcardsfan','B-tj1',[{name:'Piggy Bank Booster Pack Bundle - Black Bolt',qty:1}],20);
+    pushOrder('tjcardsfan','B-tj2',[{name:'Prismatic Evolutions Booster Pack',qty:1}],12);
+    // hold / cancel request
+    pushOrder('ripqueen','B-rip',[{name:'Pokémon 151 Booster Pack',qty:1}],22,true);
+    pushOrder('chaserchloe','B-chloe',[{name:'Piggy Bank Booster Pack Bundle - 151',qty:1}],24);
     // a cancelled example
-    pushOrder('oops_cancelled','B-oops',[{name:'Mystery pack',qty:1}],10);
+    pushOrder('oops_cancelled','B-oops',[{name:'Pokémon 151 Booster Pack',qty:1}],10);
     const os=orders.filter(o=>o.buyerId==='B-oops');
     cancelledRecs.push({key:'C'+(idc++),buyer:'oops_cancelled',buyerId:'B-oops',itemCount:1,total:10,orderIds:os.map(o=>o.id),_orders:os.map(o=>({...o}))});
     removeByBuyer('B-oops');
