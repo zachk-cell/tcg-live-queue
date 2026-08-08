@@ -194,6 +194,12 @@ app.post('/guide/login', (req, res) => {
   res.redirect('/guide?e=1');
 });
 
+// ---------- Interactive practice sandbox (same gate as the guide) ----------
+app.get('/sandbox', (req, res) => {
+  if (guideAuthed(req)) return res.type('html').send(fs.readFileSync(path.join(__dirname, 'sandbox.html'), 'utf8'));
+  res.type('html').send(guideLogin(req.query.e === '1'));
+});
+
 // ---------- Admin pages (secret path) ----------
 app.get(ADMIN, (req, res) =>
   sendAdminPage(res, isAuthed(req) ? 'index.html' : 'login.html'));
