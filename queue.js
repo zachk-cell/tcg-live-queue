@@ -42,6 +42,7 @@ export class QueueEngine extends EventEmitter {
     this.priorityItems = []; // array of lowercased substrings that trigger priority
     this.trackedVariants = []; // [{ id, label, product, variant }] — per-variant sales counters
     this.variantCounts = {}; // { [variantId]: number } — units counted when a slot hits the top
+    this.variantLog = []; // audit trail of manual counter edits/resets (most recent first)
     this.live = false; // when false, incoming orders are ignored (not queued)
     this.sessionStartedAt = null; // when the current live started
     this.history = []; // archived past streams (most recent first)
@@ -61,6 +62,7 @@ export class QueueEngine extends EventEmitter {
         this.priorityItems = (cfg.priorityItems || []).map((s) => s.toLowerCase());
         this.trackedVariants = Array.isArray(cfg.trackedVariants) ? cfg.trackedVariants : [];
         this.variantCounts = (cfg.variantCounts && typeof cfg.variantCounts === 'object') ? cfg.variantCounts : {};
+        this.variantLog = Array.isArray(cfg.variantLog) ? cfg.variantLog : [];
         this.batchCounter = cfg.batchCounter || 0;
         this.live = !!cfg.live;
         this.sessionStartedAt = cfg.sessionStartedAt || null;
@@ -186,14 +188,29 @@ export class QueueEngine extends EventEmitter {
     this.emit('change', { reason: 'variants-config' });
   }
 
-  /** Manually set one variant's counter (admin correction). */
+  /** Manually set one variant's counter (admin correction) or reset it to 0.
+   *  Every manual change is written to variantLog with the BEFORE value, so if a
+   *  counter is ever changed/reset by mistake the prior number is recoverable. */
   setVariantCount(id, n) {
     const key = String(id);
-    if (!this.trackedVariants.some((v) => v.id === key)) return false;
-    this.variantCounts[key] = Math.max(0, Math.floor(Number(n) || 0));
+    const v = this.trackedVariants.find((x) => x.id === key);
+    if (!v) return false;
+    const from = this.variantCounts[key] || 0;
+    const to = Math.max(0, Math.floor(Number(n) || 0));
+    this.variantCounts[key] = to;
+    this._logVariant({
+      id: key, label: v.label, from, to,
+      action: (to === 0 && from !== 0) ? 'reset' : 'edit',
+    });
     this._persist();
     this.emit('change', { reason: 'variant-count', id: key });
     return true;
+  }
+
+  /** Append an audit entry (most-recent-first) and cap the log size. */
+  _logVariant(entry) {
+    this.variantLog.unshift({ ts: Date.now(), ...entry });
+    if (this.variantLog.length > 200) this.variantLog.length = 200;
   }
 
   _persist() {
@@ -205,6 +222,7 @@ export class QueueEngine extends EventEmitter {
           priorityItems: this.priorityItems,
           trackedVariants: this.trackedVariants,
           variantCounts: this.variantCounts,
+          variantLog: this.variantLog,
           batchCounter: this.batchCounter,
           live: this.live,
           sessionStartedAt: this.sessionStartedAt,
@@ -333,7 +351,7 @@ export class QueueEngine extends EventEmitter {
       id,
       buyerId,
       buyer: raw.buyer || 'Buyer',
-      buyerDisplay: raw.buyerDisplay || '',
+      buyerHandle: raw.buyerHandle || '',
       items,
       total: Number(raw.total || 0),
       createdAt: raw.createdAt || Date.now(),
@@ -388,9 +406,9 @@ export class QueueEngine extends EventEmitter {
       key: batchKey,
       buyerId: first.buyerId,
       buyer: first.buyer,
-      // Admin-only cross-check: the buyer's TikTok display name (may differ from
-      // the @handle). Never surfaced on the public view.
-      buyerDisplay: first.buyerDisplay || '',
+      // Admin-only cross-check: the buyer's unique @username (the queue label is
+      // their display name). Never surfaced on the public view.
+      buyerHandle: first.buyerHandle || '',
       orderIds: orders.map((o) => o.id),
       orderCount: orders.length,
       // Per-order breakdown (oldest first) so the panel can group the expanded
@@ -531,8 +549,8 @@ export class QueueEngine extends EventEmitter {
     this._archiveCurrentStream(); // safety net if the previous stream wasn't ended
     this.orders.clear();
     this.openBatch.clear();
-    // Per-variant counters are a per-stream tally — reset them for the new stream.
-    for (const k of Object.keys(this.variantCounts)) this.variantCounts[k] = 0;
+    // Per-variant counters PERSIST across streams (cumulative running totals).
+    // They are only ever changed by the auto-tally or a manual admin edit/reset.
     this.sessionStartedAt = Date.now();
     this.live = true;
     this._persist();
@@ -636,6 +654,7 @@ export class QueueEngine extends EventEmitter {
         id: v.id, label: v.label, product: v.product, variant: v.variant,
         count: this.variantCounts[v.id] || 0,
       })),
+      variantLog: this.variantLog.slice(0, 50),
       history: this.history.map((s) => ({
         id: s.id,
         startedAt: s.startedAt,

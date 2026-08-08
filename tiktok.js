@@ -239,9 +239,12 @@ export function normalizeOrder(o) {
   return {
     id: o.id || o.order_id,
     buyerId: o.buyer_uid || o.user_id || o.buyer_email || o.id,
-    buyer: handle || display || maskedBuyerLabel(o),
-    // Admin-only cross-check. Only set when it adds information beyond the handle.
-    buyerDisplay: (display && display !== handle) ? display : '',
+    // Queue/public label = the buyer's DISPLAY NAME (what shows in TikTok live),
+    // falling back to the @username, then a masked id so a real name never leaks.
+    buyer: display || handle || maskedBuyerLabel(o),
+    // Admin-only cross-check = the unique @username, shown in the expanded order
+    // as a tiebreaker. Only set when TikTok gives one distinct from the display name.
+    buyerHandle: (handle && handle !== display) ? handle : '',
     items,
     total: Number(o.payment?.total_amount || o.total_amount || 0),
     createdAt: o.create_time ? o.create_time * 1000 : Date.now(),

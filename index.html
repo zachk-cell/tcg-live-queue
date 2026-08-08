@@ -127,17 +127,34 @@
   /* Expanded buyer cross-check line */
   .dwho{font-size:12px;color:#9aa3b6;margin-top:8px;padding-top:8px;border-top:1px dashed #272c38}
   .dwho b{color:#e8ebf2}
-  /* Variant counter admin card */
-  #variants-admin{margin:6px 0 14px}
+  /* Variant counter admin card — fixed to the left margin so it never pushes the
+     queue down. Falls back to inline (stacked) when the window is too narrow. */
+  /* Anchor the card just to the LEFT of the centered queue column (main is
+     max-width 920, so its left edge sits at 50% - 460px). This keeps it beside
+     the content instead of jammed against the browser's left edge. */
+  #variants-admin{position:fixed;right:calc(50% + 484px);top:150px;width:266px;max-height:calc(100vh - 170px);
+    overflow:auto;z-index:4}
+  @media (max-width:1499px){#variants-admin{position:static;width:auto;max-height:none;margin:6px 0 14px}}
   .vcard{background:#171a21;border:1px solid #272c38;border-radius:12px;padding:12px 14px}
   .vcard h3{margin:0 0 4px;font-size:13px}
-  .vcard .vsub{color:#8b93a7;font-size:11.5px;margin:0 0 10px}
-  .vrow{display:flex;align-items:center;gap:10px;padding:7px 0;border-top:1px solid #21262f}
+  .vcard .vsub{color:#8b93a7;font-size:11px;line-height:1.35;margin:0 0 10px}
+  .vrow{padding:8px 0;border-top:1px solid #21262f}
   .vrow:first-of-type{border-top:none}
-  .vrow .vlab{flex:1;min-width:0;font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .vrow input{width:74px;background:#1d212b;border:1px solid #272c38;color:#e8ebf2;padding:6px 8px;border-radius:8px;font-size:14px;text-align:center;font-variant-numeric:tabular-nums}
-  .vrow .vsave{background:#2b6bff;border:none;color:#fff;font-weight:700;padding:6px 11px;border-radius:8px;font-size:12px;cursor:pointer}
+  .vrow .vlab{font-weight:700;font-size:13px;margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vctl{display:flex;align-items:center;gap:6px}
+  .vrow input{width:58px;background:#1d212b;border:1px solid #272c38;color:#e8ebf2;padding:6px 8px;border-radius:8px;font-size:14px;text-align:center;font-variant-numeric:tabular-nums}
+  .vrow .vsave{background:#2b6bff;border:none;color:#fff;font-weight:700;padding:6px 10px;border-radius:8px;font-size:12px;cursor:pointer}
   .vrow .vsave.saved{background:#25c26e}
+  .vrow .vreset{background:#2a1a1a;border:1px solid #5a2a2a;color:#ff9b9b;padding:6px 10px;border-radius:8px;font-size:12px;cursor:pointer;margin-left:auto}
+  .vrow .vreset:hover{background:#3a2020}
+  .vlogwrap{margin-top:10px;border-top:1px solid #21262f;padding-top:8px}
+  .vlogwrap summary{cursor:pointer;color:#8b93a7;font-size:11.5px;font-weight:700;list-style:none}
+  .vlogwrap summary::-webkit-details-marker{display:none}
+  .vlog{margin-top:7px;max-height:150px;overflow:auto;font-size:11px;line-height:1.5;color:#9aa3b6;font-variant-numeric:tabular-nums}
+  .vlog .lr{padding:2px 0;border-top:1px dashed #21262f}
+  .vlog .lr:first-child{border-top:none}
+  .vlog .lr b{color:#e8ebf2}
+  .vlog .lr .rst{color:#ff9b9b;font-weight:700}
 </style>
 </head>
 <body>
@@ -445,17 +462,18 @@
       detailItems += `<div class="dsub">＋ Added since top of queue</div>` + added.map(groupHtml).join('');
     }
     const detailOrds = `<div class="dord">Full order number${e.orderIds.length>1?'s':''}: ${e.orderIds.map(id=>'#'+esc(id)).join('  ')}</div>`;
-    // Admin-only buyer cross-check: @handle plus the TikTok display name when it
-    // differs. Never shown on the public page.
-    const who = `<div class="dwho">Handle: <b>${esc(e.buyer||'')}</b>`
-      + (e.buyerDisplay ? ` &nbsp;·&nbsp; Display name: <b>${esc(e.buyerDisplay)}</b>` : '')
+    // Admin-only cross-check: the queue shows the buyer's DISPLAY NAME; the
+    // expanded view reveals their actual USERNAME so admins can cross-reference
+    // (two people can share a display name). Never shown on the public page.
+    const who = `<div class="dwho">Username: `
+      + (e.buyerHandle ? `<b>${esc(e.buyerHandle)}</b>` : `<span style="color:#8b93a7">not provided by TikTok</span>`)
       + `</div>`;
     return `<div class="slotmain">`
       + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
       + `<div class="pos">${e.position}</div>`
       + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
       + `<div class="items">${esc(itemStr)}</div>`
-      + `<div class="qtime"><span class="qtimer" data-since="${e.firstOrderAt||''}" data-top="${e.reachedTopAt||''}"></span></div></div>`
+      + `<div class="qtime"><span class="qtimer" data-key="${esc(e.key)}" data-since="${e.firstOrderAt||''}"></span></div></div>`
       + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
       + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<div class="money">${money(e.total)}</div>`
@@ -465,7 +483,7 @@
       + `<div class="details">${detailItems}${who}${detailOrds}</div>`;
   }
   function slotSig(e){
-    return [e.position,e.buyer,e.buyerDisplay||'',e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
+    return [e.position,e.buyer,e.buyerHandle||'',e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
       e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e._dupName?1:0,e._idTag||'',
       e.firstOrderAt||'',e.reachedTopAt||'',
       e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
@@ -474,12 +492,18 @@
   // the diff). "In queue" = since first order; "at top" = since it hit #1.
   function tickTimers(){
     const now = Date.now();
+    const topKey = window.__topKey || null;
+    const topSince = window.__topSince || 0;
     document.querySelectorAll('.qtimer').forEach(el=>{
       const since = Number(el.dataset.since)||0;
-      const top = Number(el.dataset.top)||0;
       if(!since){ el.textContent=''; return; }
       let html = '⏱ in queue '+fmtDur(now-since);
-      if(top) html += ' &nbsp;·&nbsp; <span class="qtop">at top '+fmtDur(now-top)+'</span>';
+      // "at top" only runs for whoever is CURRENTLY #1, timed from when they took
+      // the top spot — so a slot bumped down by a priority order stops showing it
+      // and restarts if it returns to #1.
+      if(topSince && el.dataset.key === topKey){
+        html += ' &nbsp;·&nbsp; <span class="qtop">at top '+fmtDur(now-topSince)+'</span>';
+      }
       el.innerHTML = html;
     });
   }
@@ -539,13 +563,18 @@
     const sig = vs.map(v=>v.id+':'+v.label).join('|');
     if(box._sig !== sig){
       box._sig = sig;
-      box.innerHTML = `<div class="vcard"><h3>📊 Bundle variant counters</h3>
-        <p class="vsub">Adds +1 per unit when an order reaches the top of the queue. Shown on the public page. Resets each stream. Edit a number and Save to correct it.</p>
+      box.innerHTML = `<div class="vcard"><h3>Piggy Bank Counter</h3>
+        <p class="vsub">Adds +1 per unit when an order reaches the top of the queue. Shown on the public page. Counts are cumulative and persist across streams — they only change from a sale, a Save, or a Reset.</p>
         ${vs.map(v=>`<div class="vrow" data-id="${esc(v.id)}">
-          <span class="vlab">${esc(v.label)}</span>
-          <input type="number" min="0" class="vin" value="${Number(v.count)||0}" />
-          <button class="vsave" onclick="saveVariant('${esc(v.id)}', this)">Save</button>
-        </div>`).join('')}</div>`;
+          <div class="vlab">${esc(v.label)}</div>
+          <div class="vctl">
+            <input type="number" min="0" class="vin" value="${Number(v.count)||0}" />
+            <button class="vsave" onclick="saveVariant('${esc(v.id)}', this)">Save</button>
+            <button class="vreset" onclick="resetVariant('${esc(v.id)}')">Reset</button>
+          </div>
+        </div>`).join('')}
+        <details class="vlogwrap"><summary>▾ Reset / edit log</summary><div class="vlog" id="vlog-list"></div></details>
+      </div>`;
     } else {
       vs.forEach(v=>{
         const row = box.querySelector('.vrow[data-id="'+String(v.id).replace(/"/g,'\\"')+'"]');
@@ -554,6 +583,20 @@
         if(input && document.activeElement !== input) input.value = Number(v.count)||0;
       });
     }
+    renderVariantLog();
+  }
+  function fmtLogTime(ts){
+    try{ return new Date(ts).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }
+    catch{ return ''; }
+  }
+  function renderVariantLog(){
+    const el = document.getElementById('vlog-list'); if(!el) return;
+    const log = state.variantLog || [];
+    if(!log.length){ el.innerHTML = '<div class="lr">No manual changes yet.</div>'; return; }
+    el.innerHTML = log.map(e=>{
+      const isReset = e.action === 'reset';
+      return `<div class="lr">${fmtLogTime(e.ts)} · <b>${esc(e.label||e.id)}</b> ${Number(e.from)||0}→${Number(e.to)||0}${isReset?' <span class="rst">(reset)</span>':''}</div>`;
+    }).join('');
   }
   async function saveVariant(id, btn){
     const row = btn.closest('.vrow');
@@ -566,10 +609,33 @@
       setTimeout(()=>{ btn.classList.remove('saved'); btn.textContent='Save'; }, 1200);
     }catch{ alert("Couldn't save that count — check your connection and try again."); }
   }
+  // Reset a single variant to 0 — requires a confirmation click first. The prior
+  // value is written to the audit log by the server so it's always recoverable.
+  async function resetVariant(id){
+    const cur = (state.variants||[]).find(v=>v.id===id);
+    const label = cur ? cur.label : id;
+    const before = cur ? (Number(cur.count)||0) : 0;
+    const ok = await uiConfirm({
+      title: 'Reset "'+label+'" to 0?',
+      body: 'This sets the '+label+' counter (currently '+before+') back to 0. The current value is saved to the reset/edit log so it can be checked later. This cannot be undone from here.',
+      confirmText: 'Reset to 0', danger:true
+    });
+    if(!ok) return;
+    try{
+      await fetch('/api/variant-count/'+encodeURIComponent(id), {
+        method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({count:0})
+      });
+    }catch{ alert("Couldn't reset that counter — check your connection and try again."); }
+  }
 
   function render(){
     const st = state.stats||{};
     const live = !!st.live;
+    // Track when the CURRENT #1 slot took the top spot. Resets whenever the top
+    // slot changes (a bump/priority displaces it, or it's fulfilled), so the
+    // per-slot "at top" timer only runs for whoever is at #1 right now.
+    const curTopKey = (state.queue && state.queue[0]) ? state.queue[0].key : null;
+    if(curTopKey !== window.__topKey){ window.__topKey = curTopKey; window.__topSince = curTopKey ? Date.now() : 0; }
     document.getElementById('dot').classList.toggle('live', live); // green = live, red = offline
     const badge = document.getElementById('liveBadge');
     badge.textContent = live ? 'LIVE' : 'OFFLINE';
