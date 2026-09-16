@@ -113,11 +113,23 @@ async function apiCall(method, pathName, extraParams = {}, jsonBody = null, retr
   const bodyStr = jsonBody ? JSON.stringify(jsonBody) : '';
   params.sign = sign(pathName, params, bodyStr);
   const qs = new URLSearchParams(params).toString();
-  const res = await fetch(`${API_BASE}${pathName}?${qs}`, {
-    method,
-    headers: { 'x-tts-access-token': tokens.accessToken, 'content-type': 'application/json' },
-    ...(jsonBody ? { body: bodyStr } : {}),
-  });
+  // Transient network failures (DNS, connection reset, the generic "fetch
+  // failed") get a couple of quick retries with a short backoff before giving
+  // up, so a brief blip doesn't turn into a poll error or a missed order.
+  let res;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      res = await fetch(`${API_BASE}${pathName}?${qs}`, {
+        method,
+        headers: { 'x-tts-access-token': tokens.accessToken, 'content-type': 'application/json' },
+        ...(jsonBody ? { body: bodyStr } : {}),
+      });
+      break;
+    } catch (e) {
+      if (attempt >= 2) throw e;
+      await new Promise((r) => setTimeout(r, 400 * (attempt + 1)));
+    }
+  }
   const body = await res.json().catch(() => ({}));
   // Refresh + retry once on any token-related error.
   if (retry && tokens.refreshToken && body && body.code && /token|auth|expire/i.test(JSON.stringify(body))) {
@@ -383,8 +395,14 @@ export function startPolling(queue) {
     if (e && e.reason === 'go-live') { sinceEpoch = Math.floor(Date.now() / 1000); seen.clear(); }
   });
 
+  let polling = false;
   async function poll() {
     if (!tiktokEnabled() || !queue.live || !tokens.accessToken || !tokens.shopCipher) return;
+    // Overlap guard: if the TikTok API is slow and a cycle runs long, don't let
+    // the interval stack a second poll on top of it (compounding API load and
+    // connection pressure). Skip this tick and let the in-flight one finish.
+    if (polling) { console.log('[tiktok] poll: previous cycle still running — skipping this tick'); return; }
+    polling = true;
     try {
       // 1) Ingest new paid orders (awaiting shipment).
       const ids = await searchOrderIds(sinceEpoch - 30, 'AWAITING_SHIPMENT'); // small overlap for safety
@@ -415,6 +433,7 @@ export function startPolling(queue) {
         }
       }
     } catch (e) { console.error('[tiktok] poll error:', e.message); }
+    finally { polling = false; }
   }
   const timer = setInterval(poll, interval);
   timer.unref?.();
