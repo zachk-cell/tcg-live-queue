@@ -274,6 +274,34 @@ export class QueueEngine extends EventEmitter {
     return true;
   }
 
+  /** Refresh cancellation info for a queued order — order-level flag plus the
+   *  per-item cancelled flags. upsertOrder is idempotent on order id, so a
+   *  cancellation that lands AFTER the order is already queued (the common case
+   *  during a live) has to be applied here rather than on re-ingest. Returns true
+   *  if anything actually changed, so the poller can log only real transitions.
+   *  info = { cancelRequested:boolean, items:[{name, cancelled}] }. */
+  setCancelInfo(orderId, info) {
+    const o = this.orders.get(String(orderId));
+    if (!o || o.status !== 'queued') return false;
+    let changed = false;
+    const nextReq = !!(info && info.cancelRequested);
+    if (!!o.cancelRequested !== nextReq) { o.cancelRequested = nextReq; changed = true; }
+    // Merge per-item cancelled flags by item name (the display name already folds
+    // in the variant, so it uniquely identifies the line to the packer).
+    if (info && Array.isArray(info.items) && info.items.length) {
+      const cancelledNames = new Set(info.items.filter((it) => it.cancelled).map((it) => it.name));
+      for (const it of (o.items || [])) {
+        const nc = cancelledNames.has(it.name);
+        if (!!it.cancelled !== nc) { it.cancelled = nc; changed = true; }
+      }
+    }
+    if (changed) {
+      this._persist();
+      this.emit('change', { reason: 'cancel-change', orderId: String(orderId), cancelRequested: nextReq });
+    }
+    return changed;
+  }
+
   /** Detailed per-order records of orders still queued (unfulfilled) this
    *  session — captured when a stream is archived so nothing is silently lost. */
   queuedRecords() {
@@ -361,6 +389,9 @@ export class QueueEngine extends EventEmitter {
       hasPriority,
       mergedWhileTop,
       onHold: !!raw.onHold,
+      // Genuine cancellation (order-level or a specific item) — distinct from the
+      // broad onHold flag, and what actually drives the CANCEL REQ badge.
+      cancelRequested: !!raw.cancelRequested,
     };
     this.orders.set(id, order);
     this._markTopReached();
@@ -396,10 +427,13 @@ export class QueueEngine extends EventEmitter {
     for (const o of orders) {
       for (const it of o.items) {
         const key = it.name;
-        itemMap.set(key, (itemMap.get(key) || 0) + (it.qty || 1));
+        const prev = itemMap.get(key) || { qty: 0, cancelled: false };
+        prev.qty += (it.qty || 1);
+        if (it.cancelled) prev.cancelled = true;
+        itemMap.set(key, prev);
       }
     }
-    const items = [...itemMap.entries()].map(([name, qty]) => ({ name, qty }));
+    const items = [...itemMap.entries()].map(([name, v]) => ({ name, qty: v.qty, cancelled: v.cancelled }));
 
     const reachedAts = orders.map((o) => o.reachedTopAt).filter(Boolean);
     return {
@@ -419,10 +453,15 @@ export class QueueEngine extends EventEmitter {
         .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
         .map((o) => {
           const m = new Map();
-          for (const it of (o.items || [])) m.set(it.name, (m.get(it.name) || 0) + (it.qty || 1));
+          for (const it of (o.items || [])) {
+            const prev = m.get(it.name) || { qty: 0, cancelled: false };
+            prev.qty += (it.qty || 1);
+            if (it.cancelled) prev.cancelled = true;
+            m.set(it.name, prev);
+          }
           return {
             id: o.id,
-            items: [...m.entries()].map(([name, qty]) => ({ name, qty })),
+            items: [...m.entries()].map(([name, v]) => ({ name, qty: v.qty, cancelled: v.cancelled })),
             addedSinceTop: !!o.mergedWhileTop,
           };
         }),
@@ -449,6 +488,10 @@ export class QueueEngine extends EventEmitter {
       // TikTok put one of this slot's orders On Hold (often a buyer cancellation
       // request on an unshipped order) — flag it so it's verified before shipping.
       onHold: orders.some((o) => o.onHold),
+      // A genuine cancellation was requested on one of this slot's orders (whole
+      // order or a specific item). This drives the red CANCEL REQ badge and the
+      // per-item highlight; the specific item(s) are marked in items/orderLines.
+      cancelRequested: orders.some((o) => o.cancelRequested),
       _bumpKey: batchKey,
     };
   }

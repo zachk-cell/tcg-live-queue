@@ -239,11 +239,20 @@ export function normalizeOrder(o) {
     const name = (variant && !base.toLowerCase().includes(String(variant).toLowerCase()))
       ? `${base} - ${variant}`
       : base;
+    // Per-item cancellation signal. On a PARTIAL cancellation TikTok flips the
+    // affected line item's display_status to a CANCEL* state and/or fills in a
+    // cancel_reason, while the rest of the order keeps shipping. Capturing it per
+    // item lets the packer see exactly which item to pull without touching the
+    // others.
+    const dstat = String(li.display_status || li.package_status || '').toUpperCase();
+    const itemCancelled = /CANCEL/.test(dstat) || !!(li.cancel_reason && String(li.cancel_reason).trim());
     return {
       name,
       sku: li.seller_sku || li.sku_id || '',
       variant: variant || '',
       qty: li.quantity || 1,
+      cancelled: itemCancelled,
+      displayStatus: dstat || '',
     };
   });
   const handle = pickHandle(o);
@@ -263,6 +272,14 @@ export function normalizeOrder(o) {
     // TikTok flips an order On Hold when there's something to check before
     // shipping — most often a buyer cancellation request on an unshipped order.
     onHold: !!o.is_on_hold_order,
+    // Definite cancellation signal: the whole order is cancelling, or a specific
+    // line item was flagged cancelled above. This — not onHold — drives the
+    // CANCEL REQ badge and the per-item highlight.
+    cancelRequested: /CANCEL/.test(String(o.status || '').toUpperCase()) || items.some((it) => it.cancelled),
+    // TikTok's deadline to respond to a buyer cancellation request (0 when none).
+    // Captured for diagnostics / a possible future upgrade; not used for the
+    // badge yet because we haven't confirmed it's exclusively cancellation-set.
+    cancelSlaAt: Number(o.cancel_order_sla_time || 0) ? Number(o.cancel_order_sla_time) * 1000 : 0,
   };
 }
 
@@ -429,6 +446,15 @@ export function startPolling(queue) {
           const id = String(o.id || o.order_id);
           if (queue.setHold(id, !!o.is_on_hold_order)) {
             console.log('[tiktok] order', id, o.is_on_hold_order ? 'ON HOLD' : 'hold cleared');
+          }
+          // Refresh cancellation state (order-level + per-item). upsertOrder is
+          // idempotent on id, so a cancellation that lands AFTER the order is
+          // queued has to be applied here, not on re-ingest.
+          if (queue.setCancelInfo) {
+            const norm = normalizeOrder(o);
+            if (queue.setCancelInfo(id, { cancelRequested: norm.cancelRequested, items: norm.items })) {
+              console.log('[tiktok] order', id, norm.cancelRequested ? 'CANCELLATION REQUESTED' : 'cancel cleared');
+            }
           }
         }
       }

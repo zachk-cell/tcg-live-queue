@@ -77,7 +77,19 @@
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
   .badge.samename{background:#4a2c00;color:#ffcf87;border:1px solid var(--pri)}
   .badge.hold{background:var(--danger);color:#fff;animation:pulse 1.3s ease-in-out infinite}
-  .slot.onhold{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger) inset}
+  /* Soft, non-alarming badge for a generic TikTok hold (address/combine/sample/
+     review) — NOT a cancellation. Amber, no pulse. */
+  .badge.onhold{background:#3a2c10;color:#f0c069;border:1px solid #7a5a1e}
+  /* Red frame only for a genuine cancellation request. */
+  .slot.cancelreq{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger) inset}
+  /* Softer amber frame for a generic hold that just needs verifying. */
+  .slot.onhold{border-color:#7a5a1e;box-shadow:0 0 0 1px #7a5a1e inset}
+  /* The specific line item(s) a buyer asked to cancel, inside the expanded view. */
+  .details .di.di-cancel{background:rgba(214,64,64,.10);border-left:3px solid var(--danger);
+    padding-left:8px;margin-left:-11px;border-radius:4px}
+  .details .di.di-cancel span:not(.diq):not(.cxflag){text-decoration:line-through;color:var(--muted)}
+  .cxflag{margin-left:8px;font-size:10px;font-weight:800;letter-spacing:.3px;color:#fff;
+    background:var(--danger);border-radius:20px;padding:1px 7px;text-decoration:none;white-space:nowrap}
   .idtag{color:var(--muted);font-size:11px;font-weight:600;flex:none}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
@@ -506,16 +518,21 @@
       ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
     // Two different buyers sharing an identical display name — flag + id tag.
     const dupBadge = e._dupName ? `<span class="badge samename" title="Another buyer in the queue has this exact display name — these are different people. Use the order numbers / id to keep them separate.">⚠ SAME NAME</span>` : '';
-    // TikTok has this order On Hold — most often a buyer cancellation request on
-    // an unshipped order (can also be an address / fraud hold). Verify before shipping.
-    const holdBadge = e.onHold ? `<span class="badge hold" title="TikTok put this order ON HOLD — during a live this is almost always a buyer cancellation request on an unshipped order (occasionally an address or fraud hold). Do NOT ship / seal the bag until you've checked it.">⚠ CANCEL REQ</span>` : '';
+    // A genuine cancellation was requested (whole order, or a specific item that's
+    // highlighted in the expanded view). This is the loud red one.
+    const cancelBadge = e.cancelRequested ? `<span class="badge hold" title="A cancellation was requested for this order — expand it to see exactly which item(s). Do NOT ship / seal the bag until you've pulled the cancelled item(s).">⚠ CANCEL REQ</span>` : '';
+    // TikTok put the order On Hold for some OTHER reason (address check, order
+    // combine/split, sample/exchange, or a pending review). Not a cancellation —
+    // just a soft heads-up to verify before shipping. Suppressed if a real cancel
+    // is already flagged.
+    const holdBadge = (!e.cancelRequested && e.onHold) ? `<span class="badge onhold" title="TikTok has this order ON HOLD — this is NOT necessarily a cancellation. Common reasons: address check, order combine/split, sample or exchange order, or a pending review. Verify before shipping.">⏸ ON HOLD — verify</span>` : '';
     const idTag = e._dupName ? `<span class="idtag" title="Buyer id (last 4) — tells same-named buyers apart">id …${esc(e._idTag)}</span>` : '';
     const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(shortId(id))).join(' ')}</span>`;
     // Expanded view: items grouped by order number, with anything the buyer added
     // after hitting #1 pulled out under a green "Added since top of queue" header.
     const lines = e.orderLines || e.orderIds.map(id=>({id, items:e.items, addedSinceTop:false}));
     const multi = lines.length > 1;
-    const itemRow = (i)=>`<div class="di"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span></div>`;
+    const itemRow = (i)=>`<div class="di${i.cancelled?' di-cancel':''}"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span>${i.cancelled?'<span class="cxflag">⚠ CANCEL REQUESTED</span>':''}</div>`;
     const groupHtml = (l)=> (multi?`<div class="dgh">#${esc(shortId(l.id))}</div>`:'') + (l.items||[]).map(itemRow).join('');
     const base = lines.filter(l=>!l.addedSinceTop);
     const added = lines.filter(l=>l.addedSinceTop);
@@ -533,7 +550,7 @@
     return `<div class="slotmain">`
       + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
       + `<div class="pos">${e.position}</div>`
-      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
+      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${cancelBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
       + `<div class="items">${esc(itemStr)}</div>`
       + `<div class="qtime"><span class="qtimer" data-key="${esc(e.key)}" data-since="${e.firstOrderAt||''}"></span></div></div>`
       + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
@@ -546,9 +563,9 @@
   }
   function slotSig(e){
     return [e.position,e.buyer,e.buyerHandle||'',e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
-      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e._dupName?1:0,e._idTag||'',
+      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e.cancelRequested?1:0,e._dupName?1:0,e._idTag||'',
       e.firstOrderAt||'',e.reachedTopAt||'',
-      e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~');
+      e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name+(i.cancelled?'!x':'')).join('|')].join('~');
   }
   // Tick every live slot's timer text in place (no re-render, so it never fights
   // the diff). "In queue" = since first order; "at top" = since it hit #1.
@@ -600,14 +617,14 @@
       const sig = slotSig(e);
       if(!node){
         node = document.createElement('div');
-        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.onHold?' onhold':'');
+        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''));
         node.innerHTML = slotInner(e);
         node._sig = sig;
         slotNodes.set(e.key, node);
         setTimeout(()=>node.classList.remove('new'), 260);
       } else if(node._sig !== sig){
         // update only the changed row's contents in place
-        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.onHold?' onhold':'');
+        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''));
         node.innerHTML = slotInner(e);
         node._sig = sig;
       }
