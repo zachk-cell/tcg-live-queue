@@ -123,6 +123,35 @@
   .prichk input{width:17px;height:17px;accent-color:var(--accent);cursor:pointer;flex:none}
   .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
   .chip{background:var(--pri-bg);color:var(--pri);border:1px solid var(--pri);border-radius:20px;padding:3px 10px;font-size:12px}
+  /* ── Stream clips (editor aid) ── */
+  .clipcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:12px}
+  .clip-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .clip-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .clip-title{font-size:15px;font-weight:800;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:6px}
+  .clip-cav{font-size:10px;color:var(--muted);transition:transform .15s}
+  .clipcard.collapsed .clip-cav{transform:rotate(-90deg)}
+  .clip-n{color:var(--muted);font-weight:700;font-size:13px}
+  .clipcard.collapsed .cliplist{display:none}
+  .clip-start{font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .clip-start b{color:var(--text)}
+  .clip-start .run{color:var(--done);font-weight:800}
+  .clip-controls{display:flex;gap:8px;flex-wrap:wrap}
+  .clip-take{font-weight:800}
+  .clip-take:disabled{opacity:.45;cursor:not-allowed}
+  .cliplist{margin-top:12px;display:flex;flex-direction:column;gap:7px;max-height:340px;overflow-y:auto}
+  .clip-empty{color:var(--muted);font-size:13px;padding:6px 2px}
+  .cliprow{display:flex;align-items:center;gap:10px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
+  .cliprow .cidx{color:var(--muted);font-weight:800;font-variant-numeric:tabular-nums;min-width:22px;text-align:center}
+  .cliprow .cclock{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;min-width:96px}
+  .cliprow .celapsed{background:var(--bg);border:1px solid var(--line);color:var(--pri);font-weight:800;font-variant-numeric:tabular-nums;
+    border-radius:8px;padding:5px 8px;width:92px;text-align:center;font-size:14px}
+  .cliprow .cnote{flex:1;min-width:120px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:5px 9px;font-size:13px}
+  .cliprow .celapsed:focus,.cliprow .cnote:focus{outline:none;border-color:var(--accent)}
+  .cliprow .cdel{background:transparent;border:1px solid transparent;color:var(--muted);cursor:pointer;font-size:14px;padding:4px 7px;border-radius:7px;flex:none}
+  .cliprow .cdel:hover{color:var(--danger);border-color:var(--danger)}
+  .start-row{display:flex;gap:10px;align-items:center;margin-top:6px}
+  .start-row input[type=time]{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:9px;padding:9px 11px;font-size:15px;font-variant-numeric:tabular-nums}
+  .start-hint{color:var(--muted);font-size:12.5px;margin-top:10px;min-height:16px}
   .livebadge{font-size:10px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:20px;
     background:#3a2020;color:#ff8b8b;vertical-align:middle;margin-left:6px}
   .livebadge.on{background:#12331f;color:#43e08a;box-shadow:0 0 8px rgba(67,224,138,.4)}
@@ -203,6 +232,22 @@
 
   <div class="chips" id="pri-chips"></div>
 
+  <div class="clipcard" id="clips-admin">
+    <div class="clip-top">
+      <div class="clip-head">
+        <span class="clip-title" onclick="toggleClips()" title="Collapse / expand the clip list"><span class="clip-cav">▾</span>🎬 Stream Clips <span class="clip-n" id="clip-n"></span></span>
+        <span class="clip-start" id="clip-startlbl">Start time not set</span>
+      </div>
+      <div class="clip-controls">
+        <button class="ghost" onclick="openStreamStart()">🕐 Set start time</button>
+        <button class="primary clip-take" id="clip-take" onclick="timeClip()" disabled title="Set the stream start time first">✂ Time Clip</button>
+        <button class="ghost" id="clip-copy" onclick="copyClips()">⧉ Copy list</button>
+        <button class="ghost" id="clip-clear" onclick="clearClipsUI()">Clear all</button>
+      </div>
+    </div>
+    <div class="cliplist" id="cliplist"></div>
+  </div>
+
   <div id="variants-admin"></div>
 
   <div id="offline-banner" class="offline-banner" style="display:none">
@@ -246,6 +291,23 @@
     <div class="row">
       <button class="ghost" onclick="closePriority()">Cancel</button>
       <button class="primary" onclick="savePriority()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="startModal">
+  <div class="card">
+    <h3>Stream start time</h3>
+    <p>Enter the time the stream started. Clip elapsed times are measured from this. Defaults to right now.</p>
+    <div class="start-row">
+      <input type="time" id="start-input" step="1" oninput="updateStartHint()" />
+      <button class="ghost" type="button" onclick="startInputToNow()">Use now</button>
+    </div>
+    <p class="start-hint" id="start-hint"></p>
+    <div class="row">
+      <button class="ghost" onclick="closeStreamStart()">Cancel</button>
+      <button class="ghost" onclick="clearStreamStart()" style="border-color:var(--danger);color:var(--danger)">Clear start</button>
+      <button class="primary" onclick="saveStreamStart()">Save</button>
     </div>
   </div>
 </div>
@@ -585,8 +647,152 @@
       }
       el.innerHTML = html;
     });
+    // Live "running for" clock on the Stream Clips card (updates every second
+    // without rebuilding the clip list).
+    const runEl = document.getElementById('clip-run');
+    if(runEl && window.__streamStart){ runEl.textContent = fmtElapsedHMS(Date.now() - window.__streamStart); }
   }
   setInterval(tickTimers, 1000);
+
+  // ───────────────────────── Stream clips (editor aid) ─────────────────────────
+  async function postClip(url, body){ return fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}); }
+  function fmtClock(ms){
+    if(!ms) return '—';
+    try{ return new Date(Number(ms)).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}); }
+    catch(e){ return '—'; }
+  }
+  function fmtElapsedHMS(ms){
+    if(ms==null||isNaN(ms)) return '0:00:00';
+    let s=Math.max(0,Math.floor(ms/1000));
+    const h=Math.floor(s/3600); s-=h*3600; const m=Math.floor(s/60); s-=m*60;
+    return h+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  }
+  function parseElapsed(str){
+    const parts=String(str).trim().split(':').map(x=>x.trim());
+    if(!parts.length || parts.some(p=>p==='' || isNaN(Number(p)))) return null;
+    let h=0,m=0,s=0;
+    if(parts.length===3){ h=+parts[0]; m=+parts[1]; s=+parts[2]; }
+    else if(parts.length===2){ m=+parts[0]; s=+parts[1]; }
+    else if(parts.length===1){ s=+parts[0]; }
+    else return null;
+    if([h,m,s].some(n=>isNaN(n)||n<0)) return null;
+    return ((h*3600)+(m*60)+s)*1000;
+  }
+  // Current local wall time as "HH:MM:SS" (24h) for the <input type=time>.
+  function nowHMS(){
+    const d=new Date();
+    return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0');
+  }
+  // Convert an HH:MM:SS wall-clock time on today's local date to epoch ms.
+  function wallToEpoch(h,m,s){
+    const d=new Date();
+    d.setHours(h||0, m||0, s||0, 0);
+    return d.getTime();
+  }
+
+  function openStreamStart(){
+    const inp=document.getElementById('start-input');
+    if(state.streamStartAt){
+      const d=new Date(state.streamStartAt);
+      inp.value=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0');
+    } else { inp.value=nowHMS(); }
+    updateStartHint();
+    document.getElementById('startModal').classList.add('open');
+  }
+  function closeStreamStart(){ document.getElementById('startModal').classList.remove('open'); }
+  function startInputToNow(){ document.getElementById('start-input').value=nowHMS(); updateStartHint(); }
+  function startEpochFromInput(){
+    const v=document.getElementById('start-input').value; if(!v) return null;
+    const [h,m,s]=v.split(':').map(Number); return wallToEpoch(h,m,s||0);
+  }
+  function updateStartHint(){
+    const at=startEpochFromInput(); const hint=document.getElementById('start-hint');
+    if(at==null){ hint.textContent=''; return; }
+    const ago=Date.now()-at;
+    hint.textContent='Start = '+fmtClock(at)+'  ('+(ago<0?'in the future':'about '+fmtElapsedHMS(ago)+' ago')+')';
+  }
+  async function saveStreamStart(){
+    const at=startEpochFromInput();
+    if(at==null){ closeStreamStart(); return; }
+    await postClip('/api/stream-start',{at});
+    closeStreamStart();
+  }
+  async function clearStreamStart(){ await postClip('/api/stream-start',{clear:true}); closeStreamStart(); }
+  async function timeClip(){ if(!state.streamStartAt) return; await postClip('/api/clip',{}); }
+  async function deleteClipUI(id){ await postClip('/api/clip/'+encodeURIComponent(id)+'/delete',{}); }
+  async function clearClipsUI(){
+    if(!(state.clips||[]).length) return;
+    const ok=await uiConfirm({title:'Clear all clips?',body:'This deletes every clip in the list. The stream start time stays set.',confirmText:'Clear all',danger:true});
+    if(ok) await postClip('/api/clips/clear',{});
+  }
+  async function saveClipElapsed(id,val){
+    const start=state.streamStartAt; if(!start) return;
+    const ms=parseElapsed(val);
+    if(ms==null){ renderClips(true); return; } // invalid → revert to stored value
+    await postClip('/api/clip/'+encodeURIComponent(id),{at:start+ms});
+  }
+  async function saveClipNote(id,val){ await postClip('/api/clip/'+encodeURIComponent(id),{note:val}); }
+  function copyClips(){
+    const start=state.streamStartAt||null;
+    const clips=(state.clips||[]).slice().sort((a,b)=>(a.at||0)-(b.at||0));
+    const lines=clips.map((c,i)=>{
+      const el=start?fmtElapsedHMS(c.at-start):'—';
+      return (i+1)+'. '+el+'   '+fmtClock(c.at)+(c.note?'   — '+c.note:'');
+    });
+    const text=(start?('Stream start: '+fmtClock(start)+'\n\n'):'')+(lines.join('\n')||'(no clips)');
+    const done=()=>{ const b=document.getElementById('clip-copy'); const t=b.textContent; b.textContent='✓ Copied'; setTimeout(()=>b.textContent=t,1300); };
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(done).catch(()=>fallbackCopy(text,done)); }
+    else fallbackCopy(text,done);
+  }
+  function fallbackCopy(text,done){ const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} ta.remove(); done&&done(); }
+
+  // Collapse state for the clip list (remembered on this device) so a long list
+  // doesn't push the queue down during a busy stream.
+  let clipsCollapsed=false;
+  try{ clipsCollapsed = localStorage.getItem('clipsCollapsed')==='1'; }catch(e){}
+  function applyClipsCollapsed(){
+    const c=document.getElementById('clips-admin');
+    if(c) c.classList.toggle('collapsed', clipsCollapsed);
+  }
+  function toggleClips(){
+    clipsCollapsed=!clipsCollapsed;
+    try{ localStorage.setItem('clipsCollapsed', clipsCollapsed?'1':'0'); }catch(e){}
+    applyClipsCollapsed();
+  }
+
+  function renderClips(force){
+    const start=state.streamStartAt||null;
+    window.__streamStart=start;
+    const clips=(state.clips||[]).slice().sort((a,b)=>(a.at||0)-(b.at||0));
+    applyClipsCollapsed();
+    const nEl=document.getElementById('clip-n');
+    if(nEl) nEl.textContent = clips.length ? ('('+clips.length+')') : '';
+    const lbl=document.getElementById('clip-startlbl');
+    if(lbl){
+      if(start){ lbl.innerHTML='Start <b>'+esc(fmtClock(start))+'</b> · running <span class="run" id="clip-run">'+esc(fmtElapsedHMS(Date.now()-start))+'</span>'; }
+      else { lbl.textContent='Start time not set'; }
+    }
+    const take=document.getElementById('clip-take');
+    if(take){ take.disabled=!start; take.title=start?'Add a clip at the current time':'Set the stream start time first'; }
+    const list=document.getElementById('cliplist'); if(!list) return;
+    const sig=JSON.stringify([start, clips.map(c=>[c.id,c.at,c.note])]);
+    // Don't clobber a field the operator is editing; refresh once focus leaves.
+    if(!force && (list._sig===sig || list.contains(document.activeElement))) return;
+    list._sig=sig;
+    if(!clips.length){ list.innerHTML='<div class="clip-empty">No clips yet — hit ✂ Time Clip during the stream to mark a moment for the editor.</div>'; return; }
+    list.innerHTML=clips.map((c,i)=>{
+      const el=start?fmtElapsedHMS(c.at-start):'—';
+      return '<div class="cliprow">'
+        +'<span class="cidx">'+(i+1)+'</span>'
+        +'<span class="cclock" title="Clip time">'+esc(fmtClock(c.at))+'</span>'
+        +'<input class="celapsed" value="'+esc(el)+'" '+(start?'':'disabled')+' title="Elapsed since stream start — edit to adjust (h:mm:ss)" '
+          +'onchange="saveClipElapsed(\''+c.id+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()" />'
+        +'<input class="cnote" placeholder="note…" value="'+esc(c.note||'')+'" '
+          +'onchange="saveClipNote(\''+c.id+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()" />'
+        +'<button class="cdel" title="Delete this clip" onclick="deleteClipUI(\''+c.id+'\')">🗑</button>'
+      +'</div>';
+    }).join('');
+  }
   function renderQueue(){
     const filter = (document.getElementById('search').value||'').toLowerCase();
     // Detect buyers who share an identical display name with ANOTHER buyer in
@@ -746,6 +952,7 @@
     renderQueue();
     tickTimers();
     renderVariantsAdmin();
+    renderClips();
 
     const fEl = document.getElementById('fulfilled');
     const f = state.fulfilled||[];

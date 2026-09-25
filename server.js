@@ -256,6 +256,27 @@ app.post('/api/variant-count/:id', requireAuth, (req, res) => {
 });
 app.post('/api/remove/:key', requireAuth, (req, res) => res.json({ ok: !!queue.removeSlot(req.params.key) }));
 
+// ── Stream clip log (editor aid) ──
+// Set (or clear) the manually-entered stream start time. Body: { at } epoch ms,
+// or { clear: true } to unset.
+app.post('/api/stream-start', requireAuth, (req, res) => {
+  const b = req.body || {};
+  const at = b.clear ? null : (b.at != null ? Number(b.at) : Date.now());
+  res.json({ ok: true, streamStartAt: queue.setStreamStart(at) });
+});
+// Add a clip mark (timestamp defaults to the server's now). Body: { at?, note? }.
+app.post('/api/clip', requireAuth, (req, res) => {
+  const b = req.body || {};
+  res.json({ ok: true, clip: queue.addClip(b.at, b.note) });
+});
+// Edit a clip's timestamp and/or note. Body: { at?, note? }.
+app.post('/api/clip/:id', requireAuth, (req, res) => {
+  const clip = queue.updateClip(req.params.id, req.body || {});
+  res.json({ ok: !!clip, clip });
+});
+app.post('/api/clip/:id/delete', requireAuth, (req, res) => res.json({ ok: queue.removeClip(req.params.id) }));
+app.post('/api/clips/clear', requireAuth, (_req, res) => res.json({ ok: queue.clearClips() }));
+
 // Inject a synthetic order for testing label printing / the panel. Admin only.
 // Optional query: ?buyer=name&n=1&item=Test%20Pack&total=9.99&buyerId=custom
 // buyerId lets you simulate two DIFFERENT buyers who share a display name.

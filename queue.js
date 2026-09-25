@@ -46,6 +46,12 @@ export class QueueEngine extends EventEmitter {
     this.live = false; // when false, incoming orders are ignored (not queued)
     this.sessionStartedAt = null; // when the current live started
     this.history = []; // archived past streams (most recent first)
+    // Stream clip log (editor aid): a manually-set stream start time and a running
+    // list of clip marks. Independent of the queue — purely a timestamp tool so
+    // moments worth clipping can be flagged with one click for the video editor.
+    this.streamStartAt = null; // ms epoch of the manually-set stream start
+    this.clips = [];           // [{ id, at (ms epoch), note }]
+    this.clipCounter = 0;
     this._ensureDataDir();
     this._load();
     this._seedFromEnv();
@@ -66,6 +72,9 @@ export class QueueEngine extends EventEmitter {
         this.batchCounter = cfg.batchCounter || 0;
         this.live = !!cfg.live;
         this.sessionStartedAt = cfg.sessionStartedAt || null;
+        this.streamStartAt = cfg.streamStartAt || null;
+        this.clips = Array.isArray(cfg.clips) ? cfg.clips : [];
+        this.clipCounter = cfg.clipCounter || 0;
       }
     } catch (e) {
       console.warn('[queue] could not load config:', e.message);
@@ -226,6 +235,9 @@ export class QueueEngine extends EventEmitter {
           batchCounter: this.batchCounter,
           live: this.live,
           sessionStartedAt: this.sessionStartedAt,
+          streamStartAt: this.streamStartAt,
+          clips: this.clips,
+          clipCounter: this.clipCounter,
         })
       );
     } catch (e) {
@@ -698,6 +710,8 @@ export class QueueEngine extends EventEmitter {
         count: this.variantCounts[v.id] || 0,
       })),
       variantLog: this.variantLog.slice(0, 50),
+      streamStartAt: this.streamStartAt,
+      clips: this.clips.slice().sort((a, b) => (a.at || 0) - (b.at || 0)),
       history: this.history.map((s) => ({
         id: s.id,
         startedAt: s.startedAt,
@@ -714,6 +728,59 @@ export class QueueEngine extends EventEmitter {
     this.openBatch.clear();
     this._persist();
     this.emit('change', { reason: 'reset' });
+  }
+
+  // ── Stream clip log (editor aid) ────────────────────────────────────────────
+  /** Set the manually-entered stream start time (ms epoch), or null to clear.
+   *  Clip elapsed times are computed against this. */
+  setStreamStart(atMs) {
+    const n = Number(atMs);
+    this.streamStartAt = (Number.isFinite(n) && n > 0) ? Math.round(n) : null;
+    this._persist();
+    this.emit('change', { reason: 'stream-start', streamStartAt: this.streamStartAt });
+    return this.streamStartAt;
+  }
+
+  /** Add a clip mark. Timestamp defaults to now (server clock) but an explicit
+   *  epoch may be supplied. Returns the created clip. */
+  addClip(atMs, note) {
+    const n = Number(atMs);
+    const at = (Number.isFinite(n) && n > 0) ? Math.round(n) : Date.now();
+    const clip = { id: `clip${++this.clipCounter}`, at, note: String(note || '').slice(0, 500) };
+    this.clips.push(clip);
+    this._persist();
+    this.emit('change', { reason: 'clip-add', id: clip.id });
+    return clip;
+  }
+
+  /** Edit a clip's timestamp (ms epoch) and/or note. */
+  updateClip(id, patch) {
+    const c = this.clips.find((x) => x.id === String(id));
+    if (!c) return null;
+    if (patch && patch.at != null) {
+      const n = Number(patch.at);
+      if (Number.isFinite(n) && n > 0) c.at = Math.round(n);
+    }
+    if (patch && patch.note != null) c.note = String(patch.note).slice(0, 500);
+    this._persist();
+    this.emit('change', { reason: 'clip-update', id: c.id });
+    return c;
+  }
+
+  removeClip(id) {
+    const i = this.clips.findIndex((x) => x.id === String(id));
+    if (i < 0) return false;
+    this.clips.splice(i, 1);
+    this._persist();
+    this.emit('change', { reason: 'clip-remove', id: String(id) });
+    return true;
+  }
+
+  clearClips() {
+    this.clips = [];
+    this._persist();
+    this.emit('change', { reason: 'clips-clear' });
+    return true;
   }
 
   /** Remove a whole slot from the queue WITHOUT fulfilling it (e.g. the buyer
