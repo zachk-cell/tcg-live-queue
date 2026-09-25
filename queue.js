@@ -43,6 +43,10 @@ export class QueueEngine extends EventEmitter {
     this.trackedVariants = []; // [{ id, label, product, variant }] — per-variant sales counters
     this.variantCounts = {}; // { [variantId]: number } — units counted when a slot hits the top
     this.variantLog = []; // audit trail of manual counter edits/resets (most recent first)
+    // Prep state: batchKeys the operator marked "prepped / ready to fulfill"
+    // (visual flag only — does not reorder the queue). Cleared when a slot leaves
+    // the queue (fulfilled/removed) or the board is cleared.
+    this.preppedBatches = new Set();
     this.live = false; // when false, incoming orders are ignored (not queued)
     this.sessionStartedAt = null; // when the current live started
     this.history = []; // archived past streams (most recent first)
@@ -75,6 +79,7 @@ export class QueueEngine extends EventEmitter {
         this.streamStartAt = cfg.streamStartAt || null;
         this.clips = Array.isArray(cfg.clips) ? cfg.clips : [];
         this.clipCounter = cfg.clipCounter || 0;
+        if (Array.isArray(cfg.preppedBatches)) this.preppedBatches = new Set(cfg.preppedBatches);
       }
     } catch (e) {
       console.warn('[queue] could not load config:', e.message);
@@ -238,6 +243,7 @@ export class QueueEngine extends EventEmitter {
           streamStartAt: this.streamStartAt,
           clips: this.clips,
           clipCounter: this.clipCounter,
+          preppedBatches: [...this.preppedBatches],
         })
       );
     } catch (e) {
@@ -504,6 +510,9 @@ export class QueueEngine extends EventEmitter {
       // order or a specific item). This drives the red CANCEL REQ badge and the
       // per-item highlight; the specific item(s) are marked in items/orderLines.
       cancelRequested: orders.some((o) => o.cancelRequested),
+      // Visual "prepped / ready to fulfill" flag the operator can toggle. Does
+      // not affect ordering; cleared automatically when the slot leaves the queue.
+      prepped: this.preppedBatches.has(batchKey),
       _bumpKey: batchKey,
     };
   }
@@ -521,6 +530,7 @@ export class QueueEngine extends EventEmitter {
       o.bumped = false;
     }
     if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
+    this.preppedBatches.delete(batchKey);
     this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'fulfilled', batchKey, buyerId });
@@ -604,6 +614,7 @@ export class QueueEngine extends EventEmitter {
     this._archiveCurrentStream(); // safety net if the previous stream wasn't ended
     this.orders.clear();
     this.openBatch.clear();
+    this.preppedBatches.clear();
     // Per-variant counters PERSIST across streams (cumulative running totals).
     // They are only ever changed by the auto-tally or a manual admin edit/reset.
     this.sessionStartedAt = Date.now();
@@ -619,6 +630,7 @@ export class QueueEngine extends EventEmitter {
     this._archiveCurrentStream();
     this.orders.clear();
     this.openBatch.clear();
+    this.preppedBatches.clear();
     this.live = false;
     this._persist();
     this.emit('change', { reason: 'end-live' });
@@ -726,8 +738,22 @@ export class QueueEngine extends EventEmitter {
   reset() {
     this.orders.clear();
     this.openBatch.clear();
+    this.preppedBatches.clear();
     this._persist();
     this.emit('change', { reason: 'reset' });
+  }
+
+  // Toggle the visual "prepped / ready to fulfill" flag on a queued slot. Purely
+  // cosmetic — it never reorders the queue. Returns false if the slot isn't a
+  // currently-queued batch.
+  setPrepped(batchKey, on) {
+    const has = [...this.orders.values()].some((o) => o.batchKey === batchKey && o.status === 'queued');
+    if (!has) return false;
+    if (on) this.preppedBatches.add(batchKey);
+    else this.preppedBatches.delete(batchKey);
+    this._persist();
+    this.emit('change', { reason: 'prep', batchKey, prepped: !!on });
+    return true;
   }
 
   // ── Stream clip log (editor aid) ────────────────────────────────────────────
@@ -795,6 +821,7 @@ export class QueueEngine extends EventEmitter {
     const now = Date.now();
     for (const o of orders) { o.status = 'cancelled'; o.cancelledAt = now; o.bumped = false; }
     if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
+    this.preppedBatches.delete(batchKey);
     this._markTopReached();
     this._persist();
     this.emit('change', { reason: 'cancelled', batchKey });

@@ -255,6 +255,8 @@ app.post('/api/variant-count/:id', requireAuth, (req, res) => {
   res.json({ ok, variantCounts: queue.variantCounts });
 });
 app.post('/api/remove/:key', requireAuth, (req, res) => res.json({ ok: !!queue.removeSlot(req.params.key) }));
+// Toggle a slot's visual "prepped / ready to fulfill" flag. Body: { on:bool }.
+app.post('/api/prep/:key', requireAuth, (req, res) => res.json({ ok: queue.setPrepped(req.params.key, !!(req.body && req.body.on)) }));
 
 // ── Stream clip log (editor aid) ──
 // Set (or clear) the manually-entered stream start time. Body: { at } epoch ms,

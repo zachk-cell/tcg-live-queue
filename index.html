@@ -97,6 +97,18 @@
   .actions button{padding:8px 11px}
   .fulfill{background:var(--done);border-color:var(--done);color:#04180d;margin-left:16px}
   .bumpb{background:transparent;color:var(--accent)}
+  .prepb{background:transparent;color:var(--done);border:1px solid var(--line)}
+  .prepb.on{background:var(--done);border-color:var(--done);color:#04180d}
+  .slot.prepped{border-color:var(--done);box-shadow:0 0 0 1px rgba(37,194,110,.5) inset}
+  .badge.prepbadge{background:var(--done);color:#04180d}
+  /* Active-queue pagination */
+  .qpager{display:flex;align-items:center;gap:12px;justify-content:center;margin:12px 4px 4px;color:var(--muted);font-size:12.5px}
+  .qpager button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12.5px;font-weight:700;cursor:pointer}
+  .qpager button:disabled{opacity:.4;cursor:default}
+  .qpager .qpinfo{font-variant-numeric:tabular-nums}
+  .pagesize{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:11px;text-transform:none;letter-spacing:0;color:var(--muted);font-weight:600}
+  .pagesize select{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:4px 8px;font-size:12.5px;font-weight:700;cursor:pointer}
+  .pagesize select:focus{outline:none;border-color:var(--accent)}
   .labelb{background:transparent;color:#cdd4e4}
   .removeb{background:transparent;color:var(--muted);border:1px solid transparent;padding:6px 9px;
     font-size:14px;line-height:1;flex:none}
@@ -223,7 +235,7 @@
 <main>
   <div class="toolbar">
     <button id="liveBtn" class="livebtn" onclick="toggleLive()">● Go Live</button>
-    <input id="search" placeholder="Filter by buyer…" oninput="render()" />
+    <input id="search" placeholder="Search buyer or order # (full or last digits)…" oninput="render()" />
     <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
     <button class="ghost" onclick="resetQueue()">Reset</button>
     <a href="{{ADMIN}}/history" style="text-decoration:none"><button class="ghost">🗂 Past streams ↗</button></a>
@@ -256,8 +268,20 @@
 
   <div id="tt-banner" class="offline-banner" style="display:none"></div>
 
-  <div class="sectitle">Active queue — top is next</div>
+  <div class="sectitle" style="display:flex;align-items:center;gap:10px">
+    <span>Active queue — top is next</span>
+    <label class="pagesize">Show
+      <select id="page-size" onchange="setQueuePageSize(this.value)">
+        <option value="10">10</option>
+        <option value="25">25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+      per page
+    </label>
+  </div>
   <div id="queue"></div>
+  <div id="queue-pager" class="qpager" style="display:none"></div>
 
   <div class="sectitle collapser" id="fhead" onclick="toggleSection('fulfilled')" style="display:flex;align-items:center;gap:8px">
     <span class="cav">▾</span><span>Fulfilled this stream</span><span class="secount" id="f-count"></span>
@@ -298,7 +322,7 @@
 <div class="modal" id="startModal">
   <div class="card">
     <h3>Stream start time</h3>
-    <p>Enter the time the stream started. Clip elapsed times are measured from this. Defaults to right now.</p>
+    <p>Enter the time the stream started, in <b>Eastern time (EST/EDT)</b>. Clip elapsed times are measured from this. Defaults to right now.</p>
     <div class="start-row">
       <input type="time" id="start-input" step="1" oninput="updateStartHint()" />
       <button class="ghost" type="button" onclick="startInputToNow()">Use now</button>
@@ -590,6 +614,7 @@
     const holdBadge = (!e.cancelRequested && e.onHold) ? `<span class="badge onhold" title="TikTok has this order ON HOLD — this is NOT necessarily a cancellation. Common reasons: address check, order combine/split, sample or exchange order, or a pending review. Verify before shipping.">⏸ ON HOLD — verify</span>` : '';
     const idTag = e._dupName ? `<span class="idtag" title="Buyer id (last 4) — tells same-named buyers apart">id …${esc(e._idTag)}</span>` : '';
     const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(shortId(id))).join(' ')}</span>`;
+    const prepBadge = e.prepped ? '<span class="badge prepbadge">✓ PREPPED</span>' : '';
     // Expanded view: items grouped by order number, with anything the buyer added
     // after hitting #1 pulled out under a green "Added since top of queue" header.
     const lines = e.orderLines || e.orderIds.map(id=>({id, items:e.items, addedSinceTop:false}));
@@ -612,20 +637,21 @@
     return `<div class="slotmain">`
       + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
       + `<div class="pos">${e.position}</div>`
-      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${cancelBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
+      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${prepBadge} ${cancelBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
       + `<div class="items">${esc(itemStr)}</div>`
       + `<div class="qtime"><span class="qtimer" data-key="${esc(e.key)}" data-since="${e.firstOrderAt||''}"></span></div></div>`
       + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
       + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
       + `<div class="money">${money(e.total)}</div>`
-      + `<div class="actions">${(e.bumped||e.position===1)?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
+      + `<div class="actions"><button class="prepb ${e.prepped?'on':''}" title="Mark prepped / ready to fulfill (visual only — doesn't change the order)" onclick="togglePrep('${e.key}',${e.prepped?'false':'true'})">📦</button>`
+      + `${(e.bumped||e.position===1)?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
       + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`
       + `</div>`
       + `<div class="details">${detailItems}${who}${detailOrds}</div>`;
   }
   function slotSig(e){
     return [e.position,e.buyer,e.buyerHandle||'',e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
-      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e.cancelRequested?1:0,e._dupName?1:0,e._idTag||'',
+      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e.cancelRequested?1:0,e.prepped?1:0,e._dupName?1:0,e._idTag||'',
       e.firstOrderAt||'',e.reachedTopAt||'',
       e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name+(i.cancelled?'!x':'')).join('|')].join('~');
   }
@@ -655,10 +681,11 @@
   setInterval(tickTimers, 1000);
 
   // ───────────────────────── Stream clips (editor aid) ─────────────────────────
+  const ET = 'America/New_York'; // Eastern time (auto EST/EDT) — PBCC runs on Eastern
   async function postClip(url, body){ return fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}); }
   function fmtClock(ms){
     if(!ms) return '—';
-    try{ return new Date(Number(ms)).toLocaleTimeString(undefined,{hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}); }
+    try{ return new Date(Number(ms)).toLocaleTimeString('en-US',{timeZone:ET,hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}); }
     catch(e){ return '—'; }
   }
   function fmtElapsedHMS(ms){
@@ -678,23 +705,28 @@
     if([h,m,s].some(n=>isNaN(n)||n<0)) return null;
     return ((h*3600)+(m*60)+s)*1000;
   }
-  // Current local wall time as "HH:MM:SS" (24h) for the <input type=time>.
+  // Current Eastern wall time as "HH:MM:SS" (24h) for the <input type=time>.
   function nowHMS(){
-    const d=new Date();
-    return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0');
+    const p=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:ET,hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date()).map(x=>[x.type,x.value]));
+    return p.hour+':'+p.minute+':'+p.second;
   }
-  // Convert an HH:MM:SS wall-clock time on today's local date to epoch ms.
+  // Convert an HH:MM:SS wall-clock time in Eastern, on TODAY's Eastern date, to
+  // epoch ms — DST-safe via offset correction (guess UTC, see the zone's wall
+  // time for that instant, correct by the difference).
   function wallToEpoch(h,m,s){
-    const d=new Date();
-    d.setHours(h||0, m||0, s||0, 0);
-    return d.getTime();
+    const dp=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:ET,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(x=>[x.type,x.value]));
+    const guess=Date.UTC(+dp.year, +dp.month-1, +dp.day, h||0, m||0, s||0);
+    const zp=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:ET,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(guess)).map(x=>[x.type,x.value]));
+    let hh=+zp.hour; if(hh===24) hh=0;
+    const asZone=Date.UTC(+zp.year, +zp.month-1, +zp.day, hh, +zp.minute, +zp.second);
+    return guess + (guess - asZone);
   }
 
   function openStreamStart(){
     const inp=document.getElementById('start-input');
     if(state.streamStartAt){
-      const d=new Date(state.streamStartAt);
-      inp.value=String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0')+':'+String(d.getSeconds()).padStart(2,'0');
+      const p=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:ET,hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(state.streamStartAt)).map(x=>[x.type,x.value]));
+      inp.value=p.hour+':'+p.minute+':'+p.second;
     } else { inp.value=nowHMS(); }
     updateStartHint();
     document.getElementById('startModal').classList.add('open');
@@ -784,7 +816,7 @@
       const el=start?fmtElapsedHMS(c.at-start):'—';
       return '<div class="cliprow">'
         +'<span class="cidx">'+(i+1)+'</span>'
-        +'<span class="cclock" title="Clip time">'+esc(fmtClock(c.at))+'</span>'
+        +'<span class="cclock" title="Clip time (Eastern)">'+esc(fmtClock(c.at))+'</span>'
         +'<input class="celapsed" value="'+esc(el)+'" '+(start?'':'disabled')+' title="Elapsed since stream start — edit to adjust (h:mm:ss)" '
           +'onchange="saveClipElapsed(\''+c.id+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()" />'
         +'<input class="cnote" placeholder="note…" value="'+esc(c.note||'')+'" '
@@ -793,8 +825,43 @@
       +'</div>';
     }).join('');
   }
+  // ── Active-queue pagination (client-side; no reload — just this area swaps) ──
+  const QUEUE_PAGE_SIZES = [10, 25, 50, 100];
+  // How many orders show per page. Defaults to 25; the operator can change it via
+  // the dropdown and the choice is remembered on this device.
+  let QUEUE_PAGE_SIZE = 25;
+  try { const saved = parseInt(localStorage.getItem('pbcc-page-size'), 10); if(QUEUE_PAGE_SIZES.includes(saved)) QUEUE_PAGE_SIZE = saved; } catch(e){}
+  let queuePage = 1;
+  let _lastQueueFilter = null;
+  function queueGoPage(n){ queuePage = n; renderQueue(); }
+  function setQueuePageSize(n){
+    n = parseInt(n, 10);
+    if(!QUEUE_PAGE_SIZES.includes(n)) return;
+    QUEUE_PAGE_SIZE = n;
+    try { localStorage.setItem('pbcc-page-size', String(n)); } catch(e){}
+    queuePage = 1; // jump back to the first page so the view isn't stranded past the end
+    renderQueue();
+  }
+  // Reflect the saved/default page size in the dropdown on load.
+  try { const _psel = document.getElementById('page-size'); if(_psel) _psel.value = String(QUEUE_PAGE_SIZE); } catch(e){}
+  function renderQueuePager(total, pages, start, end){
+    const el = document.getElementById('queue-pager'); if(!el) return;
+    if(pages <= 1){ el.style.display='none'; el.innerHTML=''; return; }
+    el.style.display='flex';
+    el.innerHTML =
+      `<button ${queuePage<=1?'disabled':''} onclick="queueGoPage(${queuePage-1})">‹ Prev</button>`
+      + `<span class="qpinfo">Showing ${start+1}–${end} of ${total} &nbsp;·&nbsp; Page ${queuePage} of ${pages}</span>`
+      + `<button ${queuePage>=pages?'disabled':''} onclick="queueGoPage(${queuePage+1})">Next ›</button>`;
+  }
+  // Toggle a slot's "prepped / ready to fulfill" flag (visual only).
+  async function togglePrep(key,on){ await postClip('/api/prep/'+encodeURIComponent(key),{on: on===true || on==='true'}); }
   function renderQueue(){
-    const filter = (document.getElementById('search').value||'').toLowerCase();
+    const filter = (document.getElementById('search').value||'').toLowerCase().trim();
+    // For order-number search, compare on an alphanumeric-only form so a partial
+    // like the last 6 digits matches regardless of a leading "#" or spaces.
+    const fAlnum = filter.replace(/[^a-z0-9]/g,'');
+    const matchOrderNo = (e) => fAlnum && (e.orderIds||[]).some(id =>
+      String(id).toLowerCase().replace(/[^a-z0-9]/g,'').includes(fAlnum));
     // Detect buyers who share an identical display name with ANOTHER buyer in
     // the queue (different people, same TikTok name). Count over the WHOLE queue
     // so a search filter never hides a duplicate. (#4)
@@ -804,7 +871,7 @@
     // ids means only genuinely different people sharing a name get flagged.
     const nameIds = {};
     for(const e of (state.queue||[])){ const n=(e.buyer||'').toLowerCase(); (nameIds[n]=nameIds[n]||new Set()).add(e.buyerId); }
-    const list = (state.queue||[]).filter(e=>!filter || e.buyer.toLowerCase().includes(filter));
+    const list = (state.queue||[]).filter(e=>!filter || e.buyer.toLowerCase().includes(filter) || matchOrderNo(e));
     for(const e of list){
       e._dupName = (nameIds[(e.buyer||'').toLowerCase()] ? nameIds[(e.buyer||'').toLowerCase()].size : 0) > 1;
       e._idTag = e._dupName ? String(e.buyerId||'').slice(-4) : '';
@@ -813,24 +880,38 @@
     if(!list.length){
       if(!qEl.querySelector('.empty')) qEl.innerHTML = '<div class="empty">Queue is empty — waiting on orders.</div>';
       slotNodes.forEach(n=>n.remove()); slotNodes.clear();
+      renderQueuePager(0, 1, 0, 0);
       return;
     }
     const emptyEl = qEl.querySelector('.empty'); if(emptyEl) emptyEl.remove();
+    // Reset to page 1 whenever the search filter changes.
+    if(filter !== _lastQueueFilter){ queuePage = 1; _lastQueueFilter = filter; }
+    // Paginate: only the current page's slots are rendered; the rest are removed
+    // by the cleanup pass below, so the queue area "turns the page" in place.
+    const total = list.length;
+    const pages = Math.max(1, Math.ceil(total / QUEUE_PAGE_SIZE));
+    if(queuePage > pages) queuePage = pages;
+    if(queuePage < 1) queuePage = 1;
+    const start = (queuePage - 1) * QUEUE_PAGE_SIZE;
+    const end = Math.min(start + QUEUE_PAGE_SIZE, total);
+    const pageList = list.slice(start, end);
+    renderQueuePager(total, pages, start, end);
     const seen = new Set();
-    list.forEach((e, idx) => {
+    pageList.forEach((e, idx) => {
       seen.add(e.key);
       let node = slotNodes.get(e.key);
       const sig = slotSig(e);
+      const xtra = e.prepped?' prepped':'';
       if(!node){
         node = document.createElement('div');
-        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''));
+        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''))+xtra;
         node.innerHTML = slotInner(e);
         node._sig = sig;
         slotNodes.set(e.key, node);
         setTimeout(()=>node.classList.remove('new'), 260);
       } else if(node._sig !== sig){
         // update only the changed row's contents in place
-        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''));
+        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''))+xtra;
         node.innerHTML = slotInner(e);
         node._sig = sig;
       }
