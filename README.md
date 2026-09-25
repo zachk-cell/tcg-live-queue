@@ -1,9 +1,33 @@
-# TCG Live Queue
+# PBCC Live Queue
+
+> **Which queue is this?** The **PBCC** queue — the original queue in the fleet, run
+> for the owner's own stream. It is its own deployment with its own identity; do not
+> confuse it with Poke Pig or iPoke.
+>
+> | | |
+> |---|---|
+> | **Brand (public page)** | PBCC Live Queue |
+> | **Platform** | TikTok Shop (orders polled from the TikTok Shop Order API) |
+> | **Timezone** | Eastern (EST/EDT) |
+> | **Public page** | https://tcg-live-queue.onrender.com/ |
+> | **GitHub repo** | `zachk-cell/tcg-live-queue` |
+> | **Render service** | `srv-d9l7embm8hqs739d587g` |
+> | **Live model** | Session-based — ingest runs only while you're **Live** |
+> | **Queue-specific** | Stream Clips, post-queue cancellation handling |
+>
+> **The fleet (three separate queues — never cross-feed branding/platform/timezone/credentials):**
+>
+> | Queue | Brand | Repo | Platform | Timezone |
+> |---|---|---|---|---|
+> | **PBCC** (this one) | PBCC Live Queue | `tcg-live-queue` | TikTok | Eastern |
+> | **Poke Pig** | Poke Pig Live Queue | `live-queue-store2` | TikTok | Mountain |
+> | **iPoke** | iPoke Live Queue | `live-queue-ipoke` | Shopify (TikTok+web → Shopify) | Pacific |
 
 An automated running-order queue for selling trading cards on TikTok Shop lives.
 Orders are pulled in automatically (no typing), grouped and prioritized by your
-rules, and shown as a self-updating live feed on a **web dashboard** and mirrored
-into **Discord**. Built to handle a busy 6-hour live (hundreds of orders).
+rules, and shown as a self-updating live feed on a **web dashboard**, a **public
+page**, and mirrored into **Discord**. Built to handle a busy multi-hour live
+(hundreds of orders).
 
 ## What it does
 
