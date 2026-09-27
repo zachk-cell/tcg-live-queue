@@ -101,7 +101,6 @@
     <span class="pill">Platform: <b>TikTok Shop</b></span>
     <span class="pill">Timezone: <b>Eastern (EST/EDT)</b></span>
     <span class="pill">Model: <b>Session-based</b></span>
-    <span class="pill">Tracker: <b>🐷 Piggy Bank</b></span>
   </div>
 </header>
 
@@ -117,7 +116,6 @@
       <li><a href="#fulfill">The fulfill loop</a></li>
       <li><a href="#buttons">Action buttons</a></li>
       <li><a href="#expanded">The expanded order view</a></li>
-      <li><a href="#piggy">The Piggy Bank counter</a></li>
       <li><a href="#clips">Stream Clips</a></li>
       <li><a href="#find">Page size &amp; order-# search</a></li>
       <li><a href="#discord">Discord mirror &amp; mod commands</a></li>
@@ -136,7 +134,7 @@
       <li>It <b>merges a buyer's orders into one slot</b>, so a buyer who keeps ordering shows up once, not ten times.</li>
       <li>It <b>floats priority items to the top</b> (breaks, slabs, whatever you configure).</li>
       <li>It warns you about <b>cancellations, holds, repeat buyers, and same-name buyers</b> before you seal a bag.</li>
-      <li>It keeps a running <b>🐷 Piggy Bank</b> tally of specific variants sold, a public queue for viewers, an optional Discord mirror, and a full CSV export.</li>
+      <li>It shows a public queue for viewers, has an optional Discord mirror, and a full CSV export.</li>
     </ul>
     <div class="callout note"><span class="ct">Everything runs on Eastern time</span>PBCC operates on Eastern (EST/EDT). Every time you see or type in this app — stream start, clip times — is Eastern.</div>
   </section>
@@ -165,7 +163,7 @@
       <li>In the panel, hit <span class="btnchip live">● Go Live</span>. Confirm the prompt.</li>
       <li>The dot turns green, the badge flips to <b>LIVE</b>, and the board starts accepting orders. Anything left over from a stream you forgot to end is safely archived to <b>Past streams</b> first, then the board is cleared for a fresh session.</li>
     </ol>
-    <div class="callout warn"><span class="ct">Go Live clears the board</span>Going live starts a brand-new session and empties the active queue. Only do it when you are actually starting a stream. (Your Piggy Bank totals are cumulative and are <b>not</b> reset by Go Live.)</div>
+    <div class="callout warn"><span class="ct">Go Live clears the board</span>Going live starts a brand-new session and empties the active queue. Only do it when you are actually starting a stream.</div>
   </section>
 
   <section id="board">
@@ -274,23 +272,8 @@
     <div class="callout warn"><span class="ct">CANCEL REQ = expand before you ship</span>A red CANCEL REQ badge means something in that slot is cancelled. Always expand it and pull the exact flagged item(s) before sealing. If the whole order is cancelled, use <b>✕ Remove</b>.</div>
   </section>
 
-  <section id="piggy">
-    <h2><span class="num">9</span> The Piggy Bank counter 🐷</h2>
-    <p class="lead">A running, cumulative tally of specific variants sold.</p>
-    <p>The <b>Piggy Bank</b> is a per-variant sales counter that lives in a card on the admin page and is also shown on the public queue. For each tracked variant, it <b>adds +1 per unit when an order reaches the top of the queue</b> — so it counts real, worked-through sales, not just anything that lands.</p>
-    <h3>Working with it</h3>
-    <ul>
-      <li><b>It counts automatically.</b> You normally don't touch it during a live.</li>
-      <li><b>Counts are cumulative</b> and persist across streams — Go Live does <b>not</b> reset them. They only change from a sale, a manual <b>Save</b>, or a <b>Reset</b>.</li>
-      <li><b>To correct a number:</b> type the right value in the variant's box and hit <b>Save</b>.</li>
-      <li><b>To zero one out:</b> hit <b>Reset</b>.</li>
-      <li><b>Every manual change is logged.</b> Open <b>▾ Reset / edit log</b> to see the before→after of each edit, so if a counter is ever changed by mistake the old number is recoverable.</li>
-    </ul>
-    <div class="callout note"><span class="ct">Never call it anything else</span>On PBCC this tracker is the <b>Piggy Bank</b> (🐷). That's the name buyers see on the public page too.</div>
-  </section>
-
   <section id="clips">
-    <h2><span class="num">10</span> Stream Clips (editor aid)</h2>
+    <h2><span class="num">9</span> Stream Clips (editor aid)</h2>
     <p class="lead">One-tap timestamps so your video editor can find the good moments.</p>
     <p>The <b>🎬 Stream Clips</b> card lets you flag moments during the live. It's independent of the queue — purely a timestamp tool.</p>
     <ol class="steps">
@@ -304,7 +287,7 @@
   </section>
 
   <section id="find">
-    <h2><span class="num">11</span> Page size &amp; order-# search</h2>
+    <h2><span class="num">10</span> Page size &amp; order-# search</h2>
     <div class="defs">
       <div class="dr"><div class="k"><b>Page size</b></div><div class="v">The <b>Show __ per page</b> dropdown above the active queue sets how many slots show at once (10 / 25 / 50 / 100). Handy when a busy stream stacks up a long line. Your choice is remembered on that device.</div></div>
       <div class="dr"><div class="k"><b>Search</b></div><div class="v">The search box filters the queue by <b>buyer name OR order number</b> — full or just the last few digits. Great for jumping straight to a buyer who's asking about their spot in chat.</div></div>
@@ -312,7 +295,7 @@
   </section>
 
   <section id="discord">
-    <h2><span class="num">12</span> Discord mirror &amp; mod commands</h2>
+    <h2><span class="num">11</span> Discord mirror &amp; mod commands</h2>
     <p class="lead">Optional — an auto-updating queue message in your Discord.</p>
     <p>When enabled, the bot keeps a single pinned message in a channel that mirrors the queue (position, name, priority/bumped marker only — <b>no</b> totals, items, or personal details, exactly like the public page). Mods can drive it without opening the web app:</p>
     <div class="defs">
@@ -324,7 +307,7 @@
   </section>
 
   <section id="endlive">
-    <h2><span class="num">13</span> Wrapping up (End Live)</h2>
+    <h2><span class="num">12</span> Wrapping up (End Live)</h2>
     <ol class="steps">
       <li>Work the queue down as far as you can.</li>
       <li>Hit <span class="btnchip endlive">■ End Live</span>. Confirm.</li>
@@ -337,7 +320,7 @@
   </section>
 
   <section id="golden">
-    <h2><span class="num">14</span> Golden rules</h2>
+    <h2><span class="num">13</span> Golden rules</h2>
     <div class="card golden callout">
       <span class="ct">Keep these five in your head</span>
       <ol>
@@ -351,14 +334,13 @@
   </section>
 
   <section id="fixes">
-    <h2><span class="num">15</span> Quick fixes</h2>
+    <h2><span class="num">14</span> Quick fixes</h2>
     <table class="mini">
       <tr><th>Problem</th><th>Fix</th></tr>
       <tr><td>Orders aren't showing up</td><td>Check the status dot. If it's red/OFFLINE, hit <b>Go Live</b> — offline orders are ignored.</td></tr>
       <tr><td>I fulfilled the wrong buyer</td><td>Fulfilled section → <b>↩ Undo</b> on that buyer.</td></tr>
       <tr><td>A buyer cancelled</td><td>Use <b>✕ Remove</b> (whole order) or expand and check the per-item CANCEL REQUESTED flags (part of an order).</td></tr>
       <tr><td>Two buyers with the same name</td><td>Look for the ⚠ SAME NAME badge and the <code>id …</code> tag; expand to see the real username.</td></tr>
-      <tr><td>Piggy Bank number looks wrong</td><td>Type the correct number and Save, or Reset. Check the Reset / edit log for the previous value.</td></tr>
       <tr><td>Can't find a buyer in a long queue</td><td>Type their name or order-# digits in the search box, or bump the page size to 100.</td></tr>
       <tr><td>The board looks frozen / stale</td><td>It auto-reconnects; if in doubt, refresh the page — the server re-sends the full current state.</td></tr>
       <tr><td>Time Clip button is greyed out</td><td>Set the stream start time first (Eastern) — clips need a start to measure elapsed from.</td></tr>
