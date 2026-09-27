@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Live Queue — Interactive Sandbox</title>
+<title>PBCC Live Queue — Interactive Sandbox</title>
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#272c38;
@@ -117,6 +117,13 @@
   button.livebtn.off{background:#c23b3b;border-color:#c23b3b;color:#fff}
   .offline-banner{background:#2a1a1a;border:1px solid #5a2a2a;color:#ffb3b3;border-radius:11px;padding:11px 14px;margin:6px 0 14px;font-size:13px}
   .ordno{color:#748099;font-variant-numeric:tabular-nums;font-size:11.5px;margin-right:6px}
+  /* 🐷 Piggy Bank tally — a per-variant sales counter, mirroring the real panel. */
+  .piggy{display:flex;align-items:center;gap:10px;flex-wrap:wrap;width:100%;margin-top:4px}
+  .piggy h2{font-size:11px;margin:0;color:var(--muted);font-weight:800;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap}
+  .piggy .grid{display:flex;flex-wrap:wrap;gap:8px}
+  .vchip{display:flex;align-items:baseline;gap:7px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:5px 11px}
+  .vchip .vl{font-size:12.5px;color:var(--muted);white-space:nowrap}
+  .vchip .vn{font-size:18px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--pri)}
 </style>
 </head>
 <body>
@@ -129,12 +136,14 @@
     <div class="stat"><b id="s-val">$0</b><span>Queue value</span></div>
     <div class="stat"><b id="s-done">0</b><span>Fulfilled</span></div>
   </div>
+  <div id="piggy" class="piggy"></div>
 </header>
 
 <main>
   <div class="demobar">
-    <h2>🧪 Interactive sandbox — nothing here is real</h2>
-    <p>This is a safe copy of the admin panel with make-believe orders. Add orders with the buttons below, then click around: expand rows, print labels, fulfill, bump, undo — you can't break anything. Refresh the page to start over.</p>
+    <h2>🧪 PBCC practice sandbox — nothing here is real</h2>
+    <p>A safe copy of the PBCC Live Queue admin panel with make-believe TikTok orders. Add orders with the buttons below, then click around: expand rows, print labels, fulfill, bump, undo, and watch the 🐷 Piggy Bank tick up as orders reach the top — you can't break anything. Refresh the page to start over.</p>
+    <p style="margin-top:0">PBCC runs on <b>Eastern (EST/EDT)</b>, and orders here stand in for real TikTok Shop orders.</p>
     <div class="btns">
       <button class="key" onclick="loadSample()">▶ Load a sample board</button>
       <button onclick="addNormal()">＋ Add order</button>
@@ -204,6 +213,17 @@
   const fulfilledRecs = []; // {key,buyer,buyerId,itemCount,total,orderIds,_orders}
   const cancelledRecs = [];
 
+  // 🐷 Piggy Bank — per-variant sales counters. Mirrors the real panel: a variant
+  // gains +1 per unit when a slot containing it first reaches the TOP of the queue.
+  // Counts are cumulative and are only cleared by Reset / Clear the board.
+  const PIGGY_VARIANTS = [
+    { id:'p151', label:'151 Packs', match:'151' },
+    { id:'brk',  label:'Breaks',    match:'break' },
+  ];
+  let piggyCounts = {};             // { [variantId]: units }
+  let piggyCounted = new Set();     // slot keys already tallied (counted once)
+  function resetPiggy(){ piggyCounts = {}; piggyCounted = new Set(); }
+
   function genId(){ return '576856' + String(10000000 + (idc++)*37).padStart(11,'0'); }
   function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
   function money(n){return '$'+Number(n||0).toFixed(2);}
@@ -241,8 +261,20 @@
   }
   function computeState(){
     const q=activeSlots();
+    // Piggy Bank: the moment a slot first reaches #1, tally its matching units.
+    const top=q[0];
+    if(top && !piggyCounted.has(top.key)){
+      piggyCounted.add(top.key);
+      for(const it of top.items){
+        const name=(it.name||'').toLowerCase();
+        for(const v of PIGGY_VARIANTS){
+          if(name.includes(v.match)) piggyCounts[v.id]=(piggyCounts[v.id]||0)+(it.qty||1);
+        }
+      }
+    }
+    const variants=PIGGY_VARIANTS.map(v=>({id:v.id,label:v.label,count:piggyCounts[v.id]||0}));
     state={ queue:q, fulfilled:fulfilledRecs.slice().reverse(), cancelled:cancelledRecs.slice().reverse(),
-      config:{priorityItems},
+      config:{priorityItems}, variants,
       stats:{ live, activeCount:q.length, priorityCount:q.filter(e=>e.isPriority).length,
         activeValue:q.reduce((s,e)=>s+e.total,0), fulfilledCount:fulfilledRecs.reduce((s,r)=>s+r.orderIds.length,0) } };
   }
@@ -289,7 +321,7 @@
   }
   async function resetQueue(){
     if(!(await uiConfirm({title:'Reset the entire board?', body:'Clears every active, fulfilled, and cancelled order. (Sandbox only — nothing real.)', confirmText:'Yes, reset', danger:true}))) return;
-    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; commit();
+    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; resetPiggy(); commit();
   }
 
   // ---------------- Confirm modal ----------------
@@ -400,8 +432,16 @@
     });
     for(const [key,node] of slotNodes){ if(!seen.has(key)){ node.remove(); slotNodes.delete(key); expandedKeys.delete(key); } }
   }
+  function renderPiggy(){
+    const box=document.getElementById('piggy'); if(!box) return;
+    const vs=state.variants||[];
+    box.innerHTML=`<h2>🐷 Piggy Bank</h2><div class="grid">${
+      vs.map(v=>`<div class="vchip"><span class="vl">${esc(v.label)}</span><span class="vn">${Number(v.count)||0}</span></div>`).join('')
+    }</div>`;
+  }
   function render(){
     const st=state.stats||{}; const isLive=!!st.live;
+    renderPiggy();
     document.getElementById('dot').classList.toggle('live',isLive);
     const badge=document.getElementById('liveBadge'); badge.textContent=isLive?'LIVE':'OFFLINE'; badge.classList.toggle('on',isLive);
     const lb=document.getElementById('liveBtn'); lb.textContent=isLive?'■ End Live':'● Go Live'; lb.classList.toggle('off',!isLive);
@@ -437,10 +477,10 @@
   function addRepeatTop(){ const top=(state.queue||[])[0]; if(!top){ alert('Add an order first, then this adds another for whoever is #1.'); return; } pushOrder(top.buyer, top.buyerId, [{name:'BREAK add-on: extra spot',qty:1}], 15); }
   function addSameName(){ const existing=(state.queue||[]).find(e=>!e._twin); const nm= existing?existing.buyer:'cardfiend'; if(!live) live=true; pushOrder(nm,'B-twin-'+(idc), [{name:pick(NORMAL),qty:1}], 12); }
   function addHold(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:pick(NORMAL),qty:1}], 20, true); }
-  function clearAll(){ orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; commit(); }
+  function clearAll(){ orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; resetPiggy(); commit(); }
 
   function loadSample(){
-    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; live=true;
+    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null; resetPiggy(); live=true;
     priorityItems=['break','slab'];
     // earlier-today: fulfill an Alex order first, so his later order flags "earlier today"
     pushOrder('Alex','B-alex',[{name:'Prizm Football pack',qty:1}],18); fulfill('B-alex');
