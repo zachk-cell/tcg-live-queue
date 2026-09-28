@@ -3,7 +3,983 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>PBCC Live Queue — Interactive Sandbox</title>
+<title>PBCC Live Queue</title>
+<script>
+(function(){
+  // ===== Browser shims so the REAL server engine (queue.js) runs client-side =====
+  class EventEmitter {
+    constructor(){ this._h = {}; }
+    on(e,f){ (this._h[e]=this._h[e]||[]).push(f); return this; }
+    off(e,f){ if(this._h[e]) this._h[e]=this._h[e].filter(x=>x!==f); return this; }
+    removeListener(e,f){ return this.off(e,f); }
+    once(e,f){ const g=(...a)=>{ this.off(e,g); f(...a); }; return this.on(e,g); }
+    emit(e,...a){ (this._h[e]||[]).slice().forEach(f=>{ try{ f(...a); }catch(_){}}); return true; }
+  }
+  const fs = { existsSync:()=>false, readFileSync:()=>'', writeFileSync:()=>{}, mkdirSync:()=>{},
+    renameSync:()=>{}, appendFileSync:()=>{}, readdirSync:()=>[], unlinkSync:()=>{}, statSync:()=>({}) };
+  const path = { join:(...a)=>a.join('/'), resolve:(...a)=>a.join('/'), dirname:p=>String(p), basename:p=>String(p) };
+  const process = { env:{}, cwd:()=>'', platform:'browser', argv:[] };
+
+  // Core queue engine.
+//
+// Behaviour (per seller's rules):
+//  - Orders are grouped into one SLOT per buyer while that buyer still has an
+//    unfulfilled slot. A buyer who orders again before being fulfilled is
+//    merged into their existing slot (items + total combined), NOT re-queued.
+//    Once a slot is fulfilled, a later order from that buyer opens a fresh slot.
+//  - PRIORITY is item-driven: if a slot contains any configured "priority item",
+//    the whole slot jumps to the top. Multiple priority slots from different
+//    buyers all sit at the top, ordered by who ordered (the priority item) first.
+//  - A slot can also be manually bumped to the very top.
+//  - "Mark fulfilled" closes a slot (the whole buyer batch).
+//  - State persists to disk so a crash/restart mid-live never loses the queue.
+
+
+
+const DATA_DIR = path.resolve(process.cwd(), 'data');
+const STATE_FILE = path.join(DATA_DIR, 'queue-state.json');
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const HISTORY_FILE = path.join(DATA_DIR, 'history.json');
+const MAX_HISTORY = 5; // keep the last N streams for the admin history view
+
+/**
+ * Order record:
+ * {
+ *   id, buyerId, buyer,
+ *   items: [{ name, qty }], total, createdAt,
+ *   status: 'queued'|'fulfilled',
+ *   batchKey,            // slot this order belongs to
+ *   hasPriority          // does this order contain a priority item
+ * }
+ */
+
+class QueueEngine extends EventEmitter {
+  constructor() {
+    super();
+    this.orders = new Map(); // orderId -> order
+    this.openBatch = new Map(); // buyerId -> current open batchKey (or absent)
+    this.batchCounter = 0;
+    this.priorityItems = []; // array of lowercased substrings that trigger priority
+    this.trackedVariants = []; // [{ id, label, product, variant }] — per-variant sales counters
+    this.variantCounts = {}; // { [variantId]: number } — units counted when a slot hits the top
+    this.variantLog = []; // audit trail of manual counter edits/resets (most recent first)
+    this.live = false; // when false, incoming orders are ignored (not queued)
+    this.sessionStartedAt = null; // when the current live started
+    this.history = []; // archived past streams (most recent first)
+    // Stream clip log (editor aid): a manually-set stream start time and a running
+    // list of clip marks. Independent of the queue — purely a timestamp tool so
+    // moments worth clipping can be flagged with one click for the video editor.
+    this.streamStartAt = null; // ms epoch of the manually-set stream start
+    this.clips = [];           // [{ id, at (ms epoch), note }]
+    this.clipCounter = 0;
+    this._ensureDataDir();
+    this._load();
+    this._seedFromEnv();
+  }
+
+  _ensureDataDir() {
+    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
+
+  _load() {
+    try {
+      if (fs.existsSync(CONFIG_FILE)) {
+        const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+        this.priorityItems = (cfg.priorityItems || []).map((s) => s.toLowerCase());
+        this.trackedVariants = Array.isArray(cfg.trackedVariants) ? cfg.trackedVariants : [];
+        this.variantCounts = (cfg.variantCounts && typeof cfg.variantCounts === 'object') ? cfg.variantCounts : {};
+        this.variantLog = Array.isArray(cfg.variantLog) ? cfg.variantLog : [];
+        this.batchCounter = cfg.batchCounter || 0;
+        this.live = !!cfg.live;
+        this.sessionStartedAt = cfg.sessionStartedAt || null;
+        this.streamStartAt = cfg.streamStartAt || null;
+        this.clips = Array.isArray(cfg.clips) ? cfg.clips : [];
+        this.clipCounter = cfg.clipCounter || 0;
+      }
+    } catch (e) {
+      console.warn('[queue] could not load config:', e.message);
+    }
+    try {
+      if (fs.existsSync(HISTORY_FILE)) {
+        this.history = JSON.parse(fs.readFileSync(HISTORY_FILE, 'utf8')) || [];
+      }
+    } catch (e) {
+      console.warn('[queue] could not load history:', e.message);
+    }
+    try {
+      if (fs.existsSync(STATE_FILE)) {
+        const arr = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+        for (const o of arr) this.orders.set(o.id, o);
+        // Rebuild openBatch map from queued orders.
+        for (const o of arr) {
+          if (o.status === 'queued') this.openBatch.set(o.buyerId, o.batchKey);
+        }
+        console.log(`[queue] restored ${this.orders.size} orders from disk`);
+      }
+    } catch (e) {
+      console.warn('[queue] could not load state:', e.message);
+    }
+  }
+
+  /**
+   * Per-store configuration lives in env vars so BOTH stores can run the exact
+   * same code. Idempotent and safe to run every boot:
+   *  - PRIORITY_ITEMS_EXTRA: comma/newline list of item substrings that should
+   *    ALWAYS trigger priority (unioned in, never removes existing).
+   *  - TRACKED_VARIANTS: JSON array of { id, label, product, variant } — the
+   *    per-variant counters. Only the DEFINITIONS are seeded; live counts in
+   *    variantCounts are never touched here.
+   */
+  _seedFromEnv() {
+    try {
+      const extra = String(process.env.PRIORITY_ITEMS_EXTRA || '')
+        .split(/[\n,]/).map((s) => s.trim().toLowerCase()).filter(Boolean);
+      if (extra.length) {
+        const set = new Set(this.priorityItems);
+        for (const p of extra) set.add(p);
+        this.priorityItems = [...set];
+      }
+    } catch (e) { console.warn('[queue] PRIORITY_ITEMS_EXTRA seed failed:', e.message); }
+    try {
+      if (process.env.TRACKED_VARIANTS) {
+        const defs = JSON.parse(process.env.TRACKED_VARIANTS);
+        if (Array.isArray(defs)) {
+          const byId = new Map(this.trackedVariants.map((v) => [v.id, v]));
+          for (const d of defs) {
+            if (!d || d.id == null) continue;
+            byId.set(String(d.id), {
+              id: String(d.id),
+              label: String(d.label || d.id),
+              product: String(d.product || ''),
+              variant: String(d.variant || ''),
+            });
+          }
+          this.trackedVariants = [...byId.values()];
+        }
+      }
+    } catch (e) { console.warn('[queue] TRACKED_VARIANTS seed failed:', e.message); }
+    // Recompute priority flags in case the env extras changed matching, then save.
+    for (const o of this.orders.values()) o.hasPriority = this._isPriorityOrder(o.items);
+    this._persist();
+  }
+
+  /** Stamp the current top slot's orders with reachedTopAt (once each) and tally
+   *  any tracked-variant units they contain. Called after every queue mutation
+   *  so "reached the top" is detected no matter what caused the reorder. */
+  _markTopReached() {
+    const top = this.activeQueue()[0];
+    if (!top) return false;
+    const orders = [...this.orders.values()].filter(
+      (o) => o.batchKey === top.key && o.status === 'queued' && !o.reachedTopAt
+    );
+    if (!orders.length) return false;
+    const now = Date.now();
+    for (const o of orders) {
+      o.reachedTopAt = now;
+      this._tallyVariants(o);
+    }
+    return true;
+  }
+
+  /** Add an order's units to any matching tracked-variant counters. Matches on
+   *  the item name/SKU text: requires the variant substring, and (if set) the
+   *  product substring too, so a short variant token can't match unrelated items. */
+  _tallyVariants(order) {
+    if (!this.trackedVariants.length) return;
+    for (const it of (order.items || [])) {
+      const text = `${it.name || ''} ${it.sku || ''}`.toLowerCase();
+      const qty = it.qty || 1;
+      for (const v of this.trackedVariants) {
+        const prod = (v.product || '').toLowerCase();
+        const varn = (v.variant || '').toLowerCase();
+        if (!varn) continue;
+        if ((!prod || text.includes(prod)) && text.includes(varn)) {
+          this.variantCounts[v.id] = (this.variantCounts[v.id] || 0) + qty;
+        }
+      }
+    }
+  }
+
+  /** Replace the tracked-variant DEFINITIONS (admin editor). Preserves the live
+   *  count for any id that still exists; drops counts for removed ids. */
+  setTrackedVariants(list) {
+    const defs = (Array.isArray(list) ? list : []).filter((d) => d && d.id != null).map((d) => ({
+      id: String(d.id),
+      label: String(d.label || d.id),
+      product: String(d.product || ''),
+      variant: String(d.variant || ''),
+    }));
+    this.trackedVariants = defs;
+    const keep = {};
+    for (const d of defs) keep[d.id] = this.variantCounts[d.id] || 0;
+    this.variantCounts = keep;
+    this._persist();
+    this.emit('change', { reason: 'variants-config' });
+  }
+
+  /** Manually set one variant's counter (admin correction) or reset it to 0.
+   *  Every manual change is written to variantLog with the BEFORE value, so if a
+   *  counter is ever changed/reset by mistake the prior number is recoverable. */
+  setVariantCount(id, n) {
+    const key = String(id);
+    const v = this.trackedVariants.find((x) => x.id === key);
+    if (!v) return false;
+    const from = this.variantCounts[key] || 0;
+    const to = Math.max(0, Math.floor(Number(n) || 0));
+    this.variantCounts[key] = to;
+    this._logVariant({
+      id: key, label: v.label, from, to,
+      action: (to === 0 && from !== 0) ? 'reset' : 'edit',
+    });
+    this._persist();
+    this.emit('change', { reason: 'variant-count', id: key });
+    return true;
+  }
+
+  /** Append an audit entry (most-recent-first) and cap the log size. */
+  _logVariant(entry) {
+    this.variantLog.unshift({ ts: Date.now(), ...entry });
+    if (this.variantLog.length > 200) this.variantLog.length = 200;
+  }
+
+  _persist() {
+    try {
+      fs.writeFileSync(STATE_FILE, JSON.stringify([...this.orders.values()]));
+      fs.writeFileSync(
+        CONFIG_FILE,
+        JSON.stringify({
+          priorityItems: this.priorityItems,
+          trackedVariants: this.trackedVariants,
+          variantCounts: this.variantCounts,
+          variantLog: this.variantLog,
+          batchCounter: this.batchCounter,
+          live: this.live,
+          sessionStartedAt: this.sessionStartedAt,
+          streamStartAt: this.streamStartAt,
+          clips: this.clips,
+          clipCounter: this.clipCounter,
+        })
+      );
+    } catch (e) {
+      console.warn('[queue] persist failed:', e.message);
+    }
+  }
+
+  _persistHistory() {
+    try {
+      fs.writeFileSync(HISTORY_FILE, JSON.stringify(this.history));
+    } catch (e) {
+      console.warn('[queue] history persist failed:', e.message);
+    }
+  }
+
+  /** Detailed per-order records of everything fulfilled this session. */
+  fulfilledRecords() {
+    return [...this.orders.values()]
+      .filter((o) => o.status === 'fulfilled')
+      .sort((a, b) => (b.fulfilledAt || 0) - (a.fulfilledAt || 0))
+      .map((o) => ({
+        orderId: o.id,
+        buyerId: o.buyerId,
+        buyer: o.buyer,
+        items: o.items,
+        total: o.total,
+        fulfilledAt: o.fulfilledAt,
+      }));
+  }
+
+  /** Order ids of everything still queued — used by the poller to batch-refresh
+   *  On Hold status. */
+  queuedOrderIds() {
+    return [...this.orders.values()].filter((o) => o.status === 'queued').map((o) => o.id);
+  }
+
+  /** Flag/unflag a queued order as On Hold (TikTok-side). Returns true if it
+   *  actually changed, so the poller can log only real transitions. */
+  setHold(orderId, onHold) {
+    const o = this.orders.get(String(orderId));
+    if (!o || o.status !== 'queued') return false;
+    if (!!o.onHold === !!onHold) return false;
+    o.onHold = !!onHold;
+    this._persist();
+    this.emit('change', { reason: 'hold-change', orderId: String(orderId), onHold: !!onHold });
+    return true;
+  }
+
+  /** Refresh cancellation info for a queued order — order-level flag plus the
+   *  per-item cancelled flags. upsertOrder is idempotent on order id, so a
+   *  cancellation that lands AFTER the order is already queued (the common case
+   *  during a live) has to be applied here rather than on re-ingest. Returns true
+   *  if anything actually changed, so the poller can log only real transitions.
+   *  info = { cancelRequested:boolean, items:[{name, cancelled}] }. */
+  setCancelInfo(orderId, info) {
+    const o = this.orders.get(String(orderId));
+    if (!o || o.status !== 'queued') return false;
+    let changed = false;
+    const nextReq = !!(info && info.cancelRequested);
+    if (!!o.cancelRequested !== nextReq) { o.cancelRequested = nextReq; changed = true; }
+    // Merge per-item cancelled flags by item name (the display name already folds
+    // in the variant, so it uniquely identifies the line to the packer).
+    if (info && Array.isArray(info.items) && info.items.length) {
+      const cancelledNames = new Set(info.items.filter((it) => it.cancelled).map((it) => it.name));
+      for (const it of (o.items || [])) {
+        const nc = cancelledNames.has(it.name);
+        if (!!it.cancelled !== nc) { it.cancelled = nc; changed = true; }
+      }
+    }
+    if (changed) {
+      this._persist();
+      this.emit('change', { reason: 'cancel-change', orderId: String(orderId), cancelRequested: nextReq });
+    }
+    return changed;
+  }
+
+  /** Detailed per-order records of orders still queued (unfulfilled) this
+   *  session — captured when a stream is archived so nothing is silently lost. */
+  queuedRecords() {
+    return [...this.orders.values()]
+      .filter((o) => o.status === 'queued')
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+      .map((o) => ({
+        orderId: o.id,
+        buyerId: o.buyerId,
+        buyer: o.buyer,
+        items: o.items,
+        total: o.total,
+        createdAt: o.createdAt,
+      }));
+  }
+
+  /** Detailed per-order records of everything cancelled this session. */
+  cancelledRecords() {
+    return [...this.orders.values()]
+      .filter((o) => o.status === 'cancelled')
+      .sort((a, b) => (b.cancelledAt || 0) - (a.cancelledAt || 0))
+      .map((o) => ({
+        orderId: o.id,
+        buyerId: o.buyerId,
+        buyer: o.buyer,
+        items: o.items,
+        total: o.total,
+        cancelledAt: o.cancelledAt,
+      }));
+  }
+
+  _isPriorityOrder(items) {
+    if (!this.priorityItems.length) return false;
+    return (items || []).some((it) => {
+      const name = (it.name || '').toLowerCase();
+      const sku = (it.sku || '').toLowerCase();
+      return this.priorityItems.some((p) => p && (name.includes(p) || sku.includes(p)));
+    });
+  }
+
+  /** Ingest an order. Merges into the buyer's open slot if one exists. */
+  upsertOrder(raw) {
+    const id = String(raw.id);
+    if (this.orders.has(id)) return this.orders.get(id); // idempotent on order id
+
+    // Off-air: when not live, incoming orders are ignored entirely.
+    if (!this.live) return null;
+
+    const buyerId = String(raw.buyerId);
+    const items = raw.items || [];
+    const hasPriority = this._isPriorityOrder(items);
+
+    // Find (or open) the buyer's active slot.
+    let batchKey = this.openBatch.get(buyerId);
+    let mergedInto = false;
+    if (batchKey) {
+      mergedInto = true;
+    } else {
+      batchKey = `${buyerId}#${++this.batchCounter}`;
+      this.openBatch.set(buyerId, batchKey);
+    }
+
+    // Was this buyer already sitting at the TOP of the queue (position 1, i.e.
+    // very likely already being packed) when this new order merged in? Flag it
+    // so the packer is loudly told to add the new item(s) to the bag in
+    // progress instead of assuming that slot is done. (Computed before the new
+    // order is added; a merge never changes the slot's position.)
+    let mergedWhileTop = false;
+    if (mergedInto) {
+      const top = this.activeQueue()[0];
+      mergedWhileTop = !!(top && top.key === batchKey);
+    }
+
+    const order = {
+      id,
+      buyerId,
+      buyer: raw.buyer || 'Buyer',
+      buyerHandle: raw.buyerHandle || '',
+      items,
+      total: Number(raw.total || 0),
+      createdAt: raw.createdAt || Date.now(),
+      receivedAt: Date.now(),
+      status: 'queued',
+      batchKey,
+      hasPriority,
+      mergedWhileTop,
+      onHold: !!raw.onHold,
+      // Genuine cancellation (order-level or a specific item) — distinct from the
+      // broad onHold flag, and what actually drives the CANCEL REQ badge.
+      cancelRequested: !!raw.cancelRequested,
+    };
+    this.orders.set(id, order);
+    this._markTopReached();
+    this._persist();
+
+    const entry = this._entryFor(batchKey);
+    this.emit('change', { reason: mergedInto ? 'merged' : 'new-slot', entry, order });
+    if (!mergedInto) this.emit('new-slot', entry);
+    else this.emit('merged', { entry, order });
+    return order;
+  }
+
+  /** Build an aggregated slot entry from all queued orders sharing a batchKey. */
+  _entryFor(batchKey) {
+    const orders = [...this.orders.values()].filter(
+      (o) => o.batchKey === batchKey && o.status === 'queued'
+    );
+    if (!orders.length) return null;
+    const first = orders.reduce((a, b) => (a.createdAt <= b.createdAt ? a : b));
+    // How many orders from this same buyer were already fulfilled earlier this
+    // stream — powers the "ordered earlier today" heads-up badge in the panel.
+    const priorFulfilled = [...this.orders.values()].filter(
+      (o) => o.buyerId === first.buyerId && o.status === 'fulfilled'
+    ).length;
+    const priorityOrders = orders.filter((o) => o.hasPriority);
+    const isPriority = priorityOrders.length > 0;
+    const priorityAt = isPriority
+      ? Math.min(...priorityOrders.map((o) => o.createdAt))
+      : Infinity;
+
+    // Merge item lines (sum quantities of same-name items).
+    const itemMap = new Map();
+    for (const o of orders) {
+      for (const it of o.items) {
+        const key = it.name;
+        const prev = itemMap.get(key) || { qty: 0, cancelled: false };
+        prev.qty += (it.qty || 1);
+        if (it.cancelled) prev.cancelled = true;
+        itemMap.set(key, prev);
+      }
+    }
+    const items = [...itemMap.entries()].map(([name, v]) => ({ name, qty: v.qty, cancelled: v.cancelled }));
+
+    const reachedAts = orders.map((o) => o.reachedTopAt).filter(Boolean);
+    return {
+      key: batchKey,
+      buyerId: first.buyerId,
+      buyer: first.buyer,
+      // Admin-only cross-check: the buyer's unique @username (the queue label is
+      // their display name). Never surfaced on the public view.
+      buyerHandle: first.buyerHandle || '',
+      orderIds: orders.map((o) => o.id),
+      orderCount: orders.length,
+      // Per-order breakdown (oldest first) so the panel can group the expanded
+      // view by order number and separate anything added after the buyer hit #1.
+      // Same-name items WITHIN an order are summed (5× pack, not 1× pack ×5).
+      orderLines: orders
+        .slice()
+        .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))
+        .map((o) => {
+          const m = new Map();
+          for (const it of (o.items || [])) {
+            const prev = m.get(it.name) || { qty: 0, cancelled: false };
+            prev.qty += (it.qty || 1);
+            if (it.cancelled) prev.cancelled = true;
+            m.set(it.name, prev);
+          }
+          return {
+            id: o.id,
+            items: [...m.entries()].map(([name, v]) => ({ name, qty: v.qty, cancelled: v.cancelled })),
+            addedSinceTop: !!o.mergedWhileTop,
+          };
+        }),
+      items,
+      itemCount: items.reduce((n, i) => n + i.qty, 0),
+      total: orders.reduce((s, o) => s + o.total, 0),
+      isPriority,
+      priorityItems: [...new Set(
+        orders.flatMap((o) => o.items.filter((it) => this._isPriorityOrder([it])).map((it) => it.name))
+      )],
+      firstOrderAt: first.createdAt,
+      // When this slot first reached the top of the queue (drives the "time at
+      // top" live timer and the fulfillment-time metric). null until it hits #1.
+      reachedTopAt: reachedAts.length ? Math.min(...reachedAts) : null,
+      priorityAt,
+      bumped: !!first.bumped,
+      priorFulfilled,
+      // True when a new order merged into this slot while it was already #1 in
+      // the queue — surfaced as a loud "ADDED MORE" badge in the panel. The
+      // count is how many times it happened, so the badge can show ×2/×3 if the
+      // buyer keeps adding after you've already started combining.
+      reorderedAtTop: orders.some((o) => o.mergedWhileTop),
+      reorderedAtTopCount: orders.filter((o) => o.mergedWhileTop).length,
+      // TikTok put one of this slot's orders On Hold (often a buyer cancellation
+      // request on an unshipped order) — flag it so it's verified before shipping.
+      onHold: orders.some((o) => o.onHold),
+      // A genuine cancellation was requested on one of this slot's orders (whole
+      // order or a specific item). This drives the red CANCEL REQ badge and the
+      // per-item highlight; the specific item(s) are marked in items/orderLines.
+      cancelRequested: orders.some((o) => o.cancelRequested),
+      _bumpKey: batchKey,
+    };
+  }
+
+  markFulfilled(batchKey) {
+    const orders = [...this.orders.values()].filter(
+      (o) => o.batchKey === batchKey && o.status === 'queued'
+    );
+    if (!orders.length) return null;
+    const buyerId = orders[0].buyerId;
+    const now = Date.now();
+    for (const o of orders) {
+      o.status = 'fulfilled';
+      o.fulfilledAt = now;
+      o.bumped = false;
+    }
+    if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
+    this._markTopReached();
+    this._persist();
+    this.emit('change', { reason: 'fulfilled', batchKey, buyerId });
+    return { batchKey, buyerId };
+  }
+
+  reopen(batchKey) {
+    const orders = [...this.orders.values()].filter((o) => o.batchKey === batchKey);
+    if (!orders.length) return null;
+    const buyerId = orders[0].buyerId;
+    // Only reopen if the buyer has no other open slot.
+    if (this.openBatch.has(buyerId)) return null;
+    for (const o of orders) {
+      o.status = 'queued';
+      o.fulfilledAt = null;
+    }
+    this.openBatch.set(buyerId, batchKey);
+    this._markTopReached();
+    this._persist();
+    this.emit('change', { reason: 'reopened', batchKey });
+    return { batchKey };
+  }
+
+  /** Force a slot to the very top. Only one slot can be bumped at a time. */
+  bump(batchKey) {
+    let found = false;
+    for (const o of this.orders.values()) {
+      if (o.batchKey === batchKey && o.status === 'queued') {
+        o.bumped = true;
+        found = true;
+      } else if (o.bumped) {
+        o.bumped = false;
+      }
+    }
+    if (!found) return null;
+    this._markTopReached();
+    this._persist();
+    this.emit('change', { reason: 'bumped', batchKey });
+    return { batchKey };
+  }
+
+  /** Configure which item names/SKUs trigger priority. Recomputes existing orders. */
+  setPriorityItems(list) {
+    this.priorityItems = (list || [])
+      .map((s) => String(s).trim().toLowerCase())
+      .filter(Boolean);
+    for (const o of this.orders.values()) {
+      o.hasPriority = this._isPriorityOrder(o.items);
+    }
+    this._markTopReached();
+    this._persist();
+    this.emit('change', { reason: 'priority-config', priorityItems: this.priorityItems });
+  }
+
+  /** Archive the current stream (fulfilled + cancelled + still-unfulfilled) to
+   *  history, if it had any activity. Does NOT clear the board — callers do. */
+  _archiveCurrentStream() {
+    const records = this.fulfilledRecords();
+    const cancelledRecs = this.cancelledRecords();
+    const unfulfilledRecs = this.queuedRecords();
+    if (records.length || cancelledRecs.length || unfulfilledRecs.length) {
+      this.history.unshift({
+        id: String(this.sessionStartedAt || Date.now()),
+        startedAt: this.sessionStartedAt || null,
+        endedAt: Date.now(),
+        count: records.length,
+        value: records.reduce((s, r) => s + r.total, 0),
+        unfulfilledCount: unfulfilledRecs.length,
+        fulfilled: records,
+        cancelled: cancelledRecs,
+        unfulfilled: unfulfilledRecs,
+      });
+      this.history = this.history.slice(0, MAX_HISTORY);
+      this._persistHistory();
+    }
+  }
+
+  /** Start a live: archives anything left from a stream that wasn't ended,
+   *  clears the queue, and begins accepting orders. */
+  goLive() {
+    this._archiveCurrentStream(); // safety net if the previous stream wasn't ended
+    this.orders.clear();
+    this.openBatch.clear();
+    // Per-variant counters PERSIST across streams (cumulative running totals).
+    // They are only ever changed by the auto-tally or a manual admin edit/reset.
+    this.sessionStartedAt = Date.now();
+    this.live = true;
+    this._persist();
+    this.emit('change', { reason: 'go-live' });
+  }
+
+  /** End a live: archive the whole stream (fulfilled, cancelled, and any
+   *  still-unfulfilled orders) to Past streams, then clear the board so the
+   *  main page empties and everything moves to history. Stops new orders. */
+  endLive() {
+    this._archiveCurrentStream();
+    this.orders.clear();
+    this.openBatch.clear();
+    this.live = false;
+    this._persist();
+    this.emit('change', { reason: 'end-live' });
+  }
+
+  /**
+   * Active queue, top = next to handle:
+   *   1. Manually bumped slot.
+   *   2. Priority slots before normal slots.
+   *   3. Priority tier: earliest priority-item purchase first.
+   *      Normal tier: earliest order first.
+   */
+  activeQueue() {
+    const keys = new Set(
+      [...this.orders.values()].filter((o) => o.status === 'queued').map((o) => o.batchKey)
+    );
+    const entries = [...keys].map((k) => this._entryFor(k)).filter(Boolean);
+    entries.sort((a, b) => {
+      if (a.bumped !== b.bumped) return a.bumped ? -1 : 1;
+      if (a.isPriority !== b.isPriority) return a.isPriority ? -1 : 1;
+      if (a.isPriority) return a.priorityAt - b.priorityAt;
+      return a.firstOrderAt - b.firstOrderAt;
+    });
+    return entries.map((e, i) => ({ ...e, position: i + 1 }));
+  }
+
+  fulfilledSlots() {
+    const byBatch = new Map();
+    for (const o of this.orders.values()) {
+      if (o.status !== 'fulfilled') continue;
+      if (!byBatch.has(o.batchKey)) byBatch.set(o.batchKey, []);
+      byBatch.get(o.batchKey).push(o);
+    }
+    const slots = [...byBatch.entries()].map(([key, orders]) => {
+      const first = orders[0];
+      const reachedAts = orders.map((o) => o.reachedTopAt).filter(Boolean);
+      return {
+        key,
+        buyer: first.buyer,
+        buyerId: first.buyerId,
+        orderIds: orders.map((o) => o.id),
+        itemCount: orders.reduce((n, o) => n + o.items.reduce((m, i) => m + (i.qty || 1), 0), 0),
+        total: orders.reduce((s, o) => s + o.total, 0),
+        fulfilledAt: Math.max(...orders.map((o) => o.fulfilledAt || 0)),
+        // Timing fields for the queue metrics.
+        firstOrderAt: Math.min(...orders.map((o) => o.createdAt || o.fulfilledAt || 0)),
+        reachedTopAt: reachedAts.length ? Math.min(...reachedAts) : null,
+      };
+    });
+    slots.sort((a, b) => b.fulfilledAt - a.fulfilledAt);
+    return slots;
+  }
+
+  stats() {
+    const active = this.activeQueue();
+    const done = this.fulfilledSlots();
+    // Average time-in-queue (placed -> fulfilled) and fulfillment time (reached
+    // top -> fulfilled) across everything fulfilled this stream.
+    const inQueue = done
+      .map((s) => (s.fulfilledAt && s.firstOrderAt) ? s.fulfilledAt - s.firstOrderAt : null)
+      .filter((v) => v != null && v >= 0);
+    const atTop = done
+      .map((s) => (s.fulfilledAt && s.reachedTopAt) ? s.fulfilledAt - s.reachedTopAt : null)
+      .filter((v) => v != null && v >= 0);
+    const avg = (a) => (a.length ? Math.round(a.reduce((x, y) => x + y, 0) / a.length) : null);
+    return {
+      activeCount: active.length,
+      priorityCount: active.filter((e) => e.isPriority).length,
+      fulfilledCount: done.length,
+      activeValue: active.reduce((s, e) => s + e.total, 0),
+      priorityItems: this.priorityItems,
+      live: this.live,
+      // Queue timing metrics (admin only). Milliseconds; null when no data yet.
+      avgTimeInQueueMs: avg(inQueue),
+      avgFulfillmentMs: avg(atTop),
+      timedCount: inQueue.length,
+    };
+  }
+
+  snapshot() {
+    return {
+      queue: this.activeQueue(),
+      fulfilled: this.fulfilledSlots().slice(0, 50),
+      cancelled: this.cancelledSlots().slice(0, 50),
+      stats: this.stats(),
+      config: { priorityItems: this.priorityItems },
+      variants: this.trackedVariants.map((v) => ({
+        id: v.id, label: v.label, product: v.product, variant: v.variant,
+        count: this.variantCounts[v.id] || 0,
+      })),
+      variantLog: this.variantLog.slice(0, 50),
+      streamStartAt: this.streamStartAt,
+      clips: this.clips.slice().sort((a, b) => (a.at || 0) - (b.at || 0)),
+      history: this.history.map((s) => ({
+        id: s.id,
+        startedAt: s.startedAt,
+        endedAt: s.endedAt,
+        count: s.count,
+        value: s.value,
+        unfulfilledCount: s.unfulfilledCount || 0,
+      })),
+    };
+  }
+
+  reset() {
+    this.orders.clear();
+    this.openBatch.clear();
+    this._persist();
+    this.emit('change', { reason: 'reset' });
+  }
+
+  // ── Stream clip log (editor aid) ────────────────────────────────────────────
+  /** Set the manually-entered stream start time (ms epoch), or null to clear.
+   *  Clip elapsed times are computed against this. */
+  setStreamStart(atMs) {
+    const n = Number(atMs);
+    this.streamStartAt = (Number.isFinite(n) && n > 0) ? Math.round(n) : null;
+    this._persist();
+    this.emit('change', { reason: 'stream-start', streamStartAt: this.streamStartAt });
+    return this.streamStartAt;
+  }
+
+  /** Add a clip mark. Timestamp defaults to now (server clock) but an explicit
+   *  epoch may be supplied. Returns the created clip. */
+  addClip(atMs, note) {
+    const n = Number(atMs);
+    const at = (Number.isFinite(n) && n > 0) ? Math.round(n) : Date.now();
+    const clip = { id: `clip${++this.clipCounter}`, at, note: String(note || '').slice(0, 500) };
+    this.clips.push(clip);
+    this._persist();
+    this.emit('change', { reason: 'clip-add', id: clip.id });
+    return clip;
+  }
+
+  /** Edit a clip's timestamp (ms epoch) and/or note. */
+  updateClip(id, patch) {
+    const c = this.clips.find((x) => x.id === String(id));
+    if (!c) return null;
+    if (patch && patch.at != null) {
+      const n = Number(patch.at);
+      if (Number.isFinite(n) && n > 0) c.at = Math.round(n);
+    }
+    if (patch && patch.note != null) c.note = String(patch.note).slice(0, 500);
+    this._persist();
+    this.emit('change', { reason: 'clip-update', id: c.id });
+    return c;
+  }
+
+  removeClip(id) {
+    const i = this.clips.findIndex((x) => x.id === String(id));
+    if (i < 0) return false;
+    this.clips.splice(i, 1);
+    this._persist();
+    this.emit('change', { reason: 'clip-remove', id: String(id) });
+    return true;
+  }
+
+  clearClips() {
+    this.clips = [];
+    this._persist();
+    this.emit('change', { reason: 'clips-clear' });
+    return true;
+  }
+
+  /** Remove a whole slot from the queue WITHOUT fulfilling it (e.g. the buyer
+   *  cancelled). Marked 'cancelled' so it drops out of the active queue and the
+   *  fulfilled list, and shows in the Cancelled section for tracking. */
+  removeSlot(batchKey) {
+    const orders = [...this.orders.values()].filter(
+      (o) => o.batchKey === batchKey && o.status === 'queued'
+    );
+    if (!orders.length) return null;
+    const buyerId = orders[0].buyerId;
+    const now = Date.now();
+    for (const o of orders) { o.status = 'cancelled'; o.cancelledAt = now; o.bumped = false; }
+    if (this.openBatch.get(buyerId) === batchKey) this.openBatch.delete(buyerId);
+    this._markTopReached();
+    this._persist();
+    this.emit('change', { reason: 'cancelled', batchKey });
+    return { batchKey };
+  }
+
+  /** Cancel a SINGLE order by its order id (used by the auto re-check when an
+   *  order flips to CANCELLED on TikTok). Leaves any other orders in the same
+   *  buyer's slot untouched. */
+  cancelOrder(orderId) {
+    const o = this.orders.get(String(orderId));
+    if (!o || o.status !== 'queued') return null;
+    o.status = 'cancelled';
+    o.cancelledAt = Date.now();
+    o.bumped = false;
+    // If the buyer's open slot has no queued orders left, close it.
+    const stillOpen = [...this.orders.values()].some(
+      (x) => x.batchKey === o.batchKey && x.status === 'queued'
+    );
+    if (!stillOpen && this.openBatch.get(o.buyerId) === o.batchKey) this.openBatch.delete(o.buyerId);
+    this._markTopReached();
+    this._persist();
+    this.emit('change', { reason: 'cancelled', orderId: String(orderId) });
+    return o;
+  }
+
+  /** Cancelled slots (grouped by buyer batch) for the admin Cancelled section. */
+  cancelledSlots() {
+    const byBatch = new Map();
+    for (const o of this.orders.values()) {
+      if (o.status !== 'cancelled') continue;
+      if (!byBatch.has(o.batchKey)) byBatch.set(o.batchKey, []);
+      byBatch.get(o.batchKey).push(o);
+    }
+    const slots = [...byBatch.entries()].map(([key, orders]) => {
+      const first = orders[0];
+      return {
+        key,
+        buyer: first.buyer,
+        buyerId: first.buyerId,
+        orderIds: orders.map((o) => o.id),
+        itemCount: orders.reduce((n, o) => n + o.items.reduce((m, i) => m + (i.qty || 1), 0), 0),
+        total: orders.reduce((s, o) => s + o.total, 0),
+        cancelledAt: Math.max(...orders.map((o) => o.cancelledAt || 0)),
+      };
+    });
+    slots.sort((a, b) => b.cancelledAt - a.cancelledAt);
+    return slots;
+  }
+
+  /** Inject a synthetic order for testing (e.g. label printing) regardless of
+   *  live state. Behaves like a real ingest otherwise (merges by buyer, etc.). */
+  injectTestOrder(raw) {
+    const wasLive = this.live;
+    this.live = true;
+    const order = this.upsertOrder(raw);
+    this.live = wasLive;
+    this._persist();
+    this.emit('change', { reason: 'test-order' });
+    return order;
+  }
+}
+
+
+  // ===== Create + seed a make-believe PBCC board (TikTok, session-based, NO tracker) =====
+  const engine = new QueueEngine();
+  try { engine.goLive(); } catch(e){}                 // session-based: must be live to accept orders
+  try { engine.setPriorityItems(['break','slab','psa 10']); } catch(e){}
+  // PBCC has NO Piggy Bank and NO Vault — deliberately seed zero tracked variants
+  // so the counter card never appears. Do NOT add a tracker here.
+
+  let oid = 3000; const T0 = Date.now();
+  function add(buyer, buyerId, items, total, ageSec){
+    try { engine.upsertOrder({ id:'P'+(oid++), buyerId, buyer, items, total, createdAt: T0 - (ageSec||0)*1000 }); } catch(e){}
+  }
+  add('Jordan M.', 'c1', [{name:'PSA 10 Slab', qty:1}], 110, 900);          // priority
+  add('Sasha L.',  'c2', [{name:'2× Booster Pack', qty:2}], 18, 840);
+  add('Owen T.',   'c3', [{name:'Vintage Break', qty:1}], 55, 780);         // priority
+  add('Maya R.',   'c4', [{name:'Single Card', qty:1}], 7, 720);
+  add('Jordan M.', 'c1', [{name:'Toploaders', qty:1}], 8, 300);             // 2nd order, same buyer
+  add('Cole V.',   'c5', [{name:'Graded Slab', qty:1}], 60, 240);           // priority
+
+  // Stream Clips — set go-live back 20 min so the running clock + clip marks read realistically.
+  try { engine.setStreamStart(T0 - 20*60*1000); } catch(e){}
+  try { engine.addClip(T0 - 14*60*1000, 'Slab break opened'); } catch(e){}
+  try { engine.addClip(T0 -  6*60*1000, 'Vintage pack hit'); } catch(e){}
+
+  // ===== Fake socket feed =====
+  let stateCb = null;
+  function pushState(){ if(stateCb){ try{ stateCb(engine.snapshot()); }catch(e){} } }
+  engine.on('change', pushState);
+  window.io = function(){
+    const sock = {
+      connected:true, io:{ on:function(){} },
+      on:function(ev,cb){
+        if(ev==='state'){ stateCb=cb; setTimeout(pushState,0); }
+        if(ev==='connect'){ setTimeout(()=>{ try{cb&&cb();}catch(e){} },0); }
+        return sock;
+      },
+      connect:function(){}, disconnect:function(){}, emit:function(){}
+    };
+    return sock;
+  };
+
+  // ===== Fake backend: route /api/* to the engine =====
+  const realFetch = (typeof window.fetch === 'function') ? window.fetch.bind(window) : null;
+  const J   = (o)=> new Response(JSON.stringify(o==null?{ok:true}:o), {status:200, headers:{'content-type':'application/json'}});
+  const TXT = (s)=> new Response(String(s||''), {status:200, headers:{'content-type':'text/plain'}});
+  window.fetch = async function(url, opts){
+    try{
+      const u = String(url); opts = opts||{};
+      if(u.indexOf('/api/') === -1){ return realFetch ? realFetch(url,opts) : J({}); }
+      const m = (opts.method||'GET').toUpperCase();
+      let body = {}; if(opts.body){ try{ body = JSON.parse(opts.body); }catch(e){ body = {}; } }
+      const parts = u.split('/api/')[1].split('?')[0].split('/');
+      const p0 = parts[0];
+      const key = parts[1] ? decodeURIComponent(parts[1]) : '';
+      const sub = parts[2] || '';
+      const call = (fn)=>{ try{ return fn(); }catch(e){ console.warn('[sandbox]', p0, e.message); } };
+      if(p0==='state' || p0==='public-state') return J(engine.snapshot());
+      else if(p0==='fulfill') call(()=>engine.markFulfilled(key));
+      else if(p0==='reopen') call(()=>engine.reopen(key));
+      else if(p0==='bump') call(()=>engine.bump(key));
+      else if(p0==='remove') call(()=>engine.removeSlot(key));
+      else if(p0==='priority-items') call(()=>engine.setPriorityItems(body.items||[]));
+      else if(p0==='variants') call(()=>engine.setTrackedVariants(body.variants||[]));
+      else if(p0==='variant-count') call(()=>engine.setVariantCount(key, Number(body.count)||0));
+      else if(p0==='stream-start') call(()=>engine.setStreamStart(body.clear ? null : (body.at!=null?Number(body.at):Date.now())));
+      else if(p0==='clip' && key && sub==='delete') call(()=>engine.removeClip(key));
+      else if(p0==='clip' && key) call(()=>engine.updateClip(key, body));
+      else if(p0==='clip') call(()=>engine.addClip(body.at, body.note));
+      else if(p0==='clips' && key==='clear') call(()=>engine.clearClips());
+      else if(p0==='live') call(()=> key==='on' ? engine.goLive() : engine.endLive());
+      else if(p0==='reset') call(()=>engine.reset());
+      else if(p0==='export') return TXT('order_id,buyer,items,total\n');
+      else if(p0==='history') return J(engine.snapshot().history||[]);
+      else if(p0==='tiktok-status') return J({ enabled:true, connected:true, shop:'@palmbeachcardco' });
+      else if(p0==='tiktok-backfill') return J({ ok:true, found:0, added:0 });
+      else if(p0==='tiktok-cancellations') return J([]);
+      pushState();
+      return J({ ok:true });
+    }catch(e){ console.warn('[sandbox] fetch', e.message); return J({ ok:false }); }
+  };
+
+  // ===== Sandbox banner + practice controls (no Piggy Bank / no Vault) =====
+  function mountControls(){
+    try{
+      const bar = document.createElement('div');
+      bar.style.cssText = 'position:sticky;top:0;z-index:99999;background:#2a2410;border-bottom:1px solid #5a4a1a;color:#ffd479;padding:8px 12px;font:600 12.5px system-ui,-apple-system,sans-serif;display:flex;gap:8px;flex-wrap:wrap;align-items:center';
+      const lbl = document.createElement('b'); lbl.textContent = '🧪 SANDBOX — practice board, nothing here is real.'; lbl.style.marginRight='6px';
+      bar.appendChild(lbl);
+      const mk = (label, fn)=>{ const b=document.createElement('button'); b.type='button'; b.textContent=label;
+        b.style.cssText='background:#1d212b;color:#e8ebf2;border:1px solid #3a3f4b;border-radius:8px;padding:5px 10px;font:700 12px system-ui;cursor:pointer'; b.onclick=fn; return b; };
+      let n = oid;
+      bar.appendChild(mk('+ Order',    ()=>add('Buyer '+n, 'nb'+(n++), [{name:'Booster Pack', qty:1}], 10, 0)));
+      bar.appendChild(mk('+ Priority', ()=>add('VIP '+n, 'nb'+(n++), [{name:'PSA 10 Slab', qty:1}], 120, 0)));
+      bar.appendChild(mk('+ Clip',     ()=>{ try{ engine.addClip(Date.now(), 'Clip @ '+new Date().toLocaleTimeString()); }catch(e){} }));
+      bar.appendChild(mk('↻ Reset board', ()=>location.reload()));
+      document.body.insertBefore(bar, document.body.firstChild);
+    }catch(e){ console.warn('[sandbox] controls', e.message); }
+  }
+  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded', mountControls); else mountControls();
+})();
+
+</script>
 <style>
   :root{
     --bg:#0f1115; --panel:#171a21; --panel2:#1d212b; --line:#272c38;
@@ -26,16 +1002,7 @@
   .stat{text-align:center;min-width:64px}
   .stat b{display:block;font-size:20px;line-height:1.1}
   .stat span{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.5px}
-  main{max-width:920px;margin:0 auto;padding:18px 16px 90px}
-  .demobar{background:linear-gradient(180deg,#122033,#141a21);border:1px solid #24405f;border-radius:14px;padding:14px 16px;margin:6px 0 16px}
-  .demobar h2{margin:0 0 4px;font-size:15px}
-  .demobar p{margin:0 0 11px;color:var(--muted);font-size:13px}
-  .demobar .btns{display:flex;gap:8px;flex-wrap:wrap}
-  .demobar button{cursor:pointer;border:1px solid var(--line);border-radius:9px;font-size:12.5px;font-weight:600;
-    padding:8px 12px;background:var(--panel2);color:var(--text);transition:.12s}
-  .demobar button:hover{filter:brightness(1.2);border-color:var(--accent)}
-  .demobar button.key{background:var(--accent2);border-color:var(--accent2)}
-  .demobar button.clr{border-color:#5a2a2a;color:#ffb3b3}
+  main{max-width:920px;margin:0 auto;padding:18px 16px 80px}
   .toolbar{display:flex;gap:10px;align-items:center;margin-bottom:14px;flex-wrap:nowrap}
   .toolbar input{flex:1;min-width:140px;background:var(--panel2);border:1px solid var(--line);
     color:var(--text);padding:9px 12px;border-radius:9px;font-size:13px}
@@ -56,6 +1023,7 @@
   .slot.bumped{outline:2px solid var(--accent)}
   .slot.reorder{border-color:var(--done);box-shadow:0 0 0 1px var(--done) inset}
   @keyframes pop{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:none}}
+  /* Inline expand: full item list revealed under the row */
   .caret{background:transparent;border:1px solid var(--line);color:var(--muted);border-radius:8px;
     padding:6px 9px;font-size:12px;line-height:1;flex:none;transition:transform .12s,color .12s,border-color .12s}
   .caret:hover{color:var(--text);border-color:var(--accent)}
@@ -72,9 +1040,11 @@
   .pos{font-variant-numeric:tabular-nums;font-weight:800;font-size:18px;width:34px;text-align:center;color:var(--muted)}
   .slot.priority .pos{color:var(--pri)}
   .who{flex:1;min-width:0}
-  .who .name{font-weight:700;font-size:15px;display:flex;align-items:center;gap:7px;min-width:0;overflow:hidden;white-space:nowrap}
+  .who .name{font-weight:700;font-size:15px;display:flex;align-items:center;gap:7px;
+    min-width:0;overflow:hidden;white-space:nowrap}
   .who .name .ordno{flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-right:0}
-  .badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;letter-spacing:.4px;white-space:nowrap;flex:none}
+  .badge{font-size:10px;font-weight:700;padding:2px 7px;border-radius:20px;letter-spacing:.4px;
+    white-space:nowrap;flex:none}
   .badge.pri{background:var(--pri);color:#2a1e00}
   .badge.multi{background:#31384a;color:#cdd4e4}
   .badge.back{background:#12303a;color:#7fdce8}
@@ -82,7 +1052,19 @@
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
   .badge.samename{background:#4a2c00;color:#ffcf87;border:1px solid var(--pri)}
   .badge.hold{background:var(--danger);color:#fff;animation:pulse 1.3s ease-in-out infinite}
-  .slot.onhold{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger) inset}
+  /* Soft, non-alarming badge for a generic TikTok hold (address/combine/sample/
+     review) — NOT a cancellation. Amber, no pulse. */
+  .badge.onhold{background:#3a2c10;color:#f0c069;border:1px solid #7a5a1e}
+  /* Red frame only for a genuine cancellation request. */
+  .slot.cancelreq{border-color:var(--danger);box-shadow:0 0 0 1px var(--danger) inset}
+  /* Softer amber frame for a generic hold that just needs verifying. */
+  .slot.onhold{border-color:#7a5a1e;box-shadow:0 0 0 1px #7a5a1e inset}
+  /* The specific line item(s) a buyer asked to cancel, inside the expanded view. */
+  .details .di.di-cancel{background:rgba(214,64,64,.10);border-left:3px solid var(--danger);
+    padding-left:8px;margin-left:-11px;border-radius:4px}
+  .details .di.di-cancel span:not(.diq):not(.cxflag){text-decoration:line-through;color:var(--muted)}
+  .cxflag{margin-left:8px;font-size:10px;font-weight:800;letter-spacing:.3px;color:#fff;
+    background:var(--danger);border-radius:20px;padding:1px 7px;text-decoration:none;white-space:nowrap}
   .idtag{color:var(--muted);font-size:11px;font-weight:600;flex:none}
   .who .items{font-size:12.5px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .money{font-weight:700;font-size:14px;font-variant-numeric:tabular-nums;margin-right:4px;white-space:nowrap}
@@ -90,84 +1072,191 @@
   .actions button{padding:8px 11px}
   .fulfill{background:var(--done);border-color:var(--done);color:#04180d;margin-left:16px}
   .bumpb{background:transparent;color:var(--accent)}
+  /* Active-queue pagination */
+  .qpager{display:flex;align-items:center;gap:12px;justify-content:center;margin:12px 4px 4px;color:var(--muted);font-size:12.5px}
+  .qpager button{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 12px;font-size:12.5px;font-weight:700;cursor:pointer}
+  .qpager button:disabled{opacity:.4;cursor:default}
+  .qpager .qpinfo{font-variant-numeric:tabular-nums}
+  .pagesize{margin-left:auto;display:inline-flex;align-items:center;gap:6px;font-size:11px;text-transform:none;letter-spacing:0;color:var(--muted);font-weight:600}
+  .pagesize select{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:4px 8px;font-size:12.5px;font-weight:700;cursor:pointer}
+  .pagesize select:focus{outline:none;border-color:var(--accent)}
   .labelb{background:transparent;color:#cdd4e4}
-  .removeb{background:transparent;color:var(--muted);border:1px solid transparent;padding:6px 9px;font-size:14px;line-height:1;flex:none}
+  .removeb{background:transparent;color:var(--muted);border:1px solid transparent;padding:6px 9px;
+    font-size:14px;line-height:1;flex:none}
   .removeb:hover{color:var(--danger);border-color:var(--danger)}
   button.danger{background:var(--danger);border-color:var(--danger);color:#fff}
   .empty{color:var(--muted);text-align:center;padding:40px;border:1px dashed var(--line);border-radius:12px}
-  .done-row{display:flex;gap:12px;align-items:center;padding:8px 12px;color:var(--muted);font-size:13px;border-bottom:1px solid var(--line)}
+  .done-row{display:flex;gap:12px;align-items:center;padding:8px 12px;color:var(--muted);font-size:13px;
+    border-bottom:1px solid var(--line)}
   .done-row .name{color:var(--text)}
   .cancel-row{border-left:2px solid var(--danger)}
   .cancel-row .name{text-decoration:line-through;color:var(--muted)}
-  .undob{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:8px;font-size:12px;font-weight:600;padding:5px 10px;cursor:pointer;white-space:nowrap}
+  .undob{background:transparent;color:var(--muted);border:1px solid var(--line);border-radius:8px;
+    font-size:12px;font-weight:600;padding:5px 10px;cursor:pointer;white-space:nowrap}
   .undob:hover{color:var(--text);border-color:var(--accent)}
   .modal{position:fixed;inset:0;background:rgba(0,0,0,.6);display:none;align-items:center;justify-content:center;z-index:20}
   .modal.open{display:flex}
   .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px;width:min(520px,92vw)}
   .card h3{margin:0 0 6px}
   .card p{color:var(--muted);font-size:13px;margin:0 0 14px}
-  .card textarea{width:100%;height:110px;background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:9px;padding:10px;font-size:13px;font-family:inherit;resize:vertical}
+  .card textarea{width:100%;height:110px;background:var(--panel2);border:1px solid var(--line);color:var(--text);
+    border-radius:9px;padding:10px;font-size:13px;font-family:inherit;resize:vertical}
   .row{display:flex;gap:10px;justify-content:flex-end;margin-top:14px}
+  .prichk{display:flex;align-items:center;gap:9px;margin-top:13px;font-size:13px;color:var(--muted);cursor:pointer;user-select:none}
+  .prichk input{width:17px;height:17px;accent-color:var(--accent);cursor:pointer;flex:none}
   .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
   .chip{background:var(--pri-bg);color:var(--pri);border:1px solid var(--pri);border-radius:20px;padding:3px 10px;font-size:12px}
-  .livebadge{font-size:10px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:20px;background:#3a2020;color:#ff8b8b;vertical-align:middle;margin-left:6px}
+  /* ── Stream clips (editor aid) ── */
+  .clipcard{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin-top:12px}
+  .clip-top{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+  .clip-head{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+  .clip-title{font-size:15px;font-weight:800;cursor:pointer;user-select:none;display:inline-flex;align-items:center;gap:6px}
+  .clip-cav{font-size:10px;color:var(--muted);transition:transform .15s}
+  .clipcard.collapsed .clip-cav{transform:rotate(-90deg)}
+  .clip-n{color:var(--muted);font-weight:700;font-size:13px}
+  .clipcard.collapsed .cliplist{display:none}
+  .clip-start{font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+  .clip-start b{color:var(--text)}
+  .clip-start .run{color:var(--done);font-weight:800}
+  .clip-controls{display:flex;gap:8px;flex-wrap:wrap}
+  .clip-take{font-weight:800}
+  .clip-take:disabled{opacity:.45;cursor:not-allowed}
+  .cliplist{margin-top:12px;display:flex;flex-direction:column;gap:7px;max-height:340px;overflow-y:auto}
+  .clip-empty{color:var(--muted);font-size:13px;padding:6px 2px}
+  .cliprow{display:flex;align-items:center;gap:10px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:7px 10px}
+  .cliprow .cidx{color:var(--muted);font-weight:800;font-variant-numeric:tabular-nums;min-width:22px;text-align:center}
+  .cliprow .cclock{color:var(--muted);font-size:12px;font-variant-numeric:tabular-nums;min-width:96px}
+  .cliprow .celapsed{background:var(--bg);border:1px solid var(--line);color:var(--pri);font-weight:800;font-variant-numeric:tabular-nums;
+    border-radius:8px;padding:5px 8px;width:92px;text-align:center;font-size:14px}
+  .cliprow .cnote{flex:1;min-width:120px;background:var(--bg);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:5px 9px;font-size:13px}
+  .cliprow .celapsed:focus,.cliprow .cnote:focus{outline:none;border-color:var(--accent)}
+  .cliprow .cdel{background:transparent;border:1px solid transparent;color:var(--muted);cursor:pointer;font-size:14px;padding:4px 7px;border-radius:7px;flex:none}
+  .cliprow .cdel:hover{color:var(--danger);border-color:var(--danger)}
+  .start-row{display:flex;gap:10px;align-items:center;margin-top:6px}
+  .start-row input[type=time]{background:var(--panel2);border:1px solid var(--line);color:var(--text);border-radius:9px;padding:9px 11px;font-size:15px;font-variant-numeric:tabular-nums}
+  .start-hint{color:var(--muted);font-size:12.5px;margin-top:10px;min-height:16px}
+  .livebadge{font-size:10px;font-weight:800;letter-spacing:.6px;padding:3px 8px;border-radius:20px;
+    background:#3a2020;color:#ff8b8b;vertical-align:middle;margin-left:6px}
   .livebadge.on{background:#12331f;color:#43e08a;box-shadow:0 0 8px rgba(67,224,138,.4)}
-  .demopill{font-size:10px;font-weight:800;letter-spacing:.4px;padding:3px 8px;border-radius:20px;background:#24405f;color:#8fc3ff;vertical-align:middle;margin-left:4px}
+  .ttbadge{font-size:10px;font-weight:800;letter-spacing:.4px;padding:3px 8px;border-radius:20px;vertical-align:middle;margin-left:4px}
+  .ttbadge.ok{background:#0e2a44;color:#6fb3ff}
+  .ttbadge.bad{background:#3a2020;color:#ff8b8b}
+  /* Live-feed connection indicator. Red + pulsing when the feed is down so a
+     stale (frozen) page is instantly obvious; calm green when connected. */
+  .conn{font-size:10px;font-weight:800;letter-spacing:.4px;padding:3px 8px;border-radius:20px;
+    vertical-align:middle;margin-left:4px;background:#3a2020;color:#ff8b8b;animation:pulse 1.3s ease-in-out infinite}
+  .conn.ok{background:#12331f;color:#43e08a;animation:none}
+  .tt-banner a{color:#ffd7d7;font-weight:700}
   button.livebtn{background:var(--done);border-color:var(--done);color:#04180d;font-weight:800}
   button.livebtn.off{background:#c23b3b;border-color:#c23b3b;color:#fff}
-  .offline-banner{background:#2a1a1a;border:1px solid #5a2a2a;color:#ffb3b3;border-radius:11px;padding:11px 14px;margin:6px 0 14px;font-size:13px}
+  .offline-banner{background:#2a1a1a;border:1px solid #5a2a2a;color:#ffb3b3;border-radius:11px;
+    padding:11px 14px;margin:6px 0 14px;font-size:13px}
   .ordno{color:#748099;font-variant-numeric:tabular-nums;font-size:11.5px;margin-right:6px}
+  /* Live per-slot timers */
+  .qtime{font-size:11.5px;color:#8b93a7;margin-top:3px;font-variant-numeric:tabular-nums}
+  .qtime .qtop{color:var(--pri,#ffb020);font-weight:700}
+  /* Expanded buyer cross-check line */
+  .dwho{font-size:12px;color:#9aa3b6;margin-top:8px;padding-top:8px;border-top:1px dashed #272c38}
+  .dwho b{color:#e8ebf2}
+  /* Variant counter admin card — fixed to the left margin so it never pushes the
+     queue down. Falls back to inline (stacked) when the window is too narrow. */
+  /* Anchor the card just to the LEFT of the centered queue column (main is
+     max-width 920, so its left edge sits at 50% - 460px). This keeps it beside
+     the content instead of jammed against the browser's left edge. */
+  #variants-admin{position:fixed;right:calc(50% + 484px);top:150px;width:266px;max-height:calc(100vh - 170px);
+    overflow:auto;z-index:4}
+  @media (max-width:1499px){#variants-admin{position:static;width:auto;max-height:none;margin:6px 0 14px}}
+  .vcard{background:#171a21;border:1px solid #272c38;border-radius:12px;padding:12px 14px}
+  .vcard h3{margin:0 0 4px;font-size:13px}
+  .vcard .vsub{color:#8b93a7;font-size:11px;line-height:1.35;margin:0 0 10px}
+  .vrow{padding:8px 0;border-top:1px solid #21262f}
+  .vrow:first-of-type{border-top:none}
+  .vrow .vlab{font-weight:700;font-size:13px;margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .vctl{display:flex;align-items:center;gap:6px}
+  .vrow input{width:58px;background:#1d212b;border:1px solid #272c38;color:#e8ebf2;padding:6px 8px;border-radius:8px;font-size:14px;text-align:center;font-variant-numeric:tabular-nums}
+  .vrow .vsave{background:#2b6bff;border:none;color:#fff;font-weight:700;padding:6px 10px;border-radius:8px;font-size:12px;cursor:pointer}
+  .vrow .vsave.saved{background:#25c26e}
+  .vrow .vreset{background:#2a1a1a;border:1px solid #5a2a2a;color:#ff9b9b;padding:6px 10px;border-radius:8px;font-size:12px;cursor:pointer;margin-left:auto}
+  .vrow .vreset:hover{background:#3a2020}
+  .vlogwrap{margin-top:10px;border-top:1px solid #21262f;padding-top:8px}
+  .vlogwrap summary{cursor:pointer;color:#8b93a7;font-size:11.5px;font-weight:700;list-style:none}
+  .vlogwrap summary::-webkit-details-marker{display:none}
+  .vlog{margin-top:7px;max-height:150px;overflow:auto;font-size:11px;line-height:1.5;color:#9aa3b6;font-variant-numeric:tabular-nums}
+  .vlog .lr{padding:2px 0;border-top:1px dashed #21262f}
+  .vlog .lr:first-child{border-top:none}
+  .vlog .lr b{color:#e8ebf2}
+  .vlog .lr .rst{color:#ff9b9b;font-weight:700}
 </style>
 </head>
 <body>
 <header>
-  <h1><span id="dot" class="dot"></span>PBCC Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span> <span class="demopill">🧪 SANDBOX</span></h1>
-  <a href="/guide" class="hdr-link hdr-logout">← Back to guide</a>
+  <h1><span id="dot" class="dot"></span>PBCC Live Queue <span id="liveBadge" class="livebadge">OFFLINE</span> <span id="ttStatus" class="ttbadge" style="display:none"></span> <span id="connDot" class="conn ok" title="Live feed connected">● Live feed</span></h1>
+  <a href="/guide" target="_blank" class="hdr-link">📖 Guide ↗</a>
+  <a href="{{ADMIN}}/logout" class="hdr-link hdr-logout">Log out</a>
   <div class="stats">
     <div class="stat"><b id="s-active">0</b><span>In queue</span></div>
     <div class="stat"><b id="s-pri">0</b><span>Priority</span></div>
     <div class="stat"><b id="s-val">$0</b><span>Queue value</span></div>
     <div class="stat"><b id="s-done">0</b><span>Fulfilled</span></div>
+    <div class="stat"><b id="s-avgq">—</b><span>Avg in queue</span></div>
+    <div class="stat"><b id="s-avgt">—</b><span>Avg at top</span></div>
   </div>
 </header>
 
 <main>
-  <div class="demobar">
-    <h2>🧪 PBCC practice sandbox — nothing here is real</h2>
-    <p>A safe copy of the PBCC Live Queue admin panel with make-believe TikTok orders. Add orders with the buttons below, then click around: expand rows, print labels, fulfill, bump, undo — you can't break anything. Refresh the page to start over.</p>
-    <p style="margin-top:0">PBCC runs on <b>Eastern (EST/EDT)</b>, and orders here stand in for real TikTok Shop orders.</p>
-    <div class="btns">
-      <button class="key" onclick="loadSample()">▶ Load a sample board</button>
-      <button onclick="addNormal()">＋ Add order</button>
-      <button onclick="addPriority()">⭐ Add priority (break)</button>
-      <button onclick="addRepeatTop()">🔁 Add repeat for #1</button>
-      <button onclick="addQtyOrder()">×5 Add a 5-quantity order</button>
-      <button onclick="addSameName()">👥 Add same-name buyer</button>
-      <button onclick="addHold()">⚠ Add cancel-request</button>
-      <button class="clr" onclick="clearAll()">Clear the board</button>
-    </div>
-  </div>
-
   <div class="toolbar">
     <button id="liveBtn" class="livebtn" onclick="toggleLive()">● Go Live</button>
-    <input id="search" placeholder="Filter by buyer…" oninput="render()" />
+    <input id="search" placeholder="Search buyer or order # (full or last digits)…" oninput="render()" />
     <button class="ghost" onclick="openPriority()">⭐ Priority items</button>
     <button class="ghost" onclick="resetQueue()">Reset</button>
-    <button class="ghost" onclick="alert('In the real panel this opens Past streams. Disabled in the sandbox.')">🗂 Past streams ↗</button>
+    <a href="{{ADMIN}}/history" style="text-decoration:none"><button class="ghost">🗂 Past streams ↗</button></a>
+    <a href="/" target="_blank" style="text-decoration:none"><button class="ghost">Public view ↗</button></a>
   </div>
 
   <div class="chips" id="pri-chips"></div>
 
-  <div id="offline-banner" class="offline-banner" style="display:none">
-    ⚫ You're <b>offline</b> — in the real panel, new orders are ignored until you hit <b>Go Live</b>. (In the sandbox you can add orders anytime.)
+  <div class="clipcard" id="clips-admin">
+    <div class="clip-top">
+      <div class="clip-head">
+        <span class="clip-title" onclick="toggleClips()" title="Collapse / expand the clip list"><span class="clip-cav">▾</span>🎬 Stream Clips <span class="clip-n" id="clip-n"></span></span>
+        <span class="clip-start" id="clip-startlbl">Start time not set</span>
+      </div>
+      <div class="clip-controls">
+        <button class="ghost" onclick="openStreamStart()">🕐 Set start time</button>
+        <button class="primary clip-take" id="clip-take" onclick="timeClip()" disabled title="Set the stream start time first">✂ Time Clip</button>
+        <button class="ghost" id="clip-copy" onclick="copyClips()">⧉ Copy list</button>
+        <button class="ghost" id="clip-clear" onclick="clearClipsUI()">Clear all</button>
+      </div>
+    </div>
+    <div class="cliplist" id="cliplist"></div>
   </div>
 
-  <div class="sectitle">Active queue — top is next</div>
+  <div id="variants-admin"></div>
+
+  <div id="offline-banner" class="offline-banner" style="display:none">
+    ⚫ You're <b>offline</b> — new orders are being ignored and won't enter the queue. Hit <b>Go Live</b> to start a fresh queue and begin accepting orders.
+  </div>
+
+  <div id="tt-banner" class="offline-banner" style="display:none"></div>
+
+  <div class="sectitle" style="display:flex;align-items:center;gap:10px">
+    <span>Active queue — top is next</span>
+    <label class="pagesize">Show
+      <select id="page-size" onchange="setQueuePageSize(this.value)">
+        <option value="10">10</option>
+        <option value="25">25</option>
+        <option value="50">50</option>
+        <option value="100">100</option>
+      </select>
+      per page
+    </label>
+  </div>
   <div id="queue"></div>
+  <div id="queue-pager" class="qpager" style="display:none"></div>
 
   <div class="sectitle collapser" id="fhead" onclick="toggleSection('fulfilled')" style="display:flex;align-items:center;gap:8px">
     <span class="cav">▾</span><span>Fulfilled this stream</span><span class="secount" id="f-count"></span>
-    <button class="ghost" style="margin-left:auto" onclick="alert('In the real panel this exports a CSV of the fulfilled orders. Disabled in the sandbox.')">⬇ Export CSV</button>
+    <a href="/api/export" style="text-decoration:none;margin-left:auto" onclick="event.stopPropagation()"><button class="ghost">⬇ Export CSV</button></a>
   </div>
   <div id="fulfilled"></div>
 
@@ -181,297 +1270,798 @@
   <div class="card">
     <h3 id="cm-title">Confirm</h3>
     <p id="cm-body"></p>
-    <div class="row"><button class="ghost" id="cm-cancel">Cancel</button><button class="primary" id="cm-ok">Confirm</button></div>
+    <div class="row">
+      <button class="ghost" id="cm-cancel">Cancel</button>
+      <button class="primary" id="cm-ok">Confirm</button>
+    </div>
   </div>
 </div>
 
 <div class="modal" id="modal">
   <div class="card">
     <h3>Priority items</h3>
-    <p>Any order containing one of these (matched inside the item name) jumps to the top. One per line. Example: <em>break</em>, <em>slab</em>, <em>PSA 10</em>.</p>
+    <p>Any order containing one of these (matched inside the item name or SKU) jumps to the top of the queue. One per line. Example: <em>break</em>, <em>slab</em>, <em>PSA 10</em>.</p>
     <textarea id="pri-input" placeholder="break&#10;slab&#10;box break"></textarea>
-    <div class="row"><button class="ghost" onclick="closePriority()">Cancel</button><button class="primary" onclick="savePriority()">Save</button></div>
+    <label class="prichk"><input type="checkbox" id="pri-show-chips" onchange="togglePriChips()" checked> Show the active keyword chips on the admin page</label>
+    <div class="row">
+      <button class="ghost" onclick="closePriority()">Cancel</button>
+      <button class="primary" onclick="savePriority()">Save</button>
+    </div>
+  </div>
+</div>
+
+<div class="modal" id="startModal">
+  <div class="card">
+    <h3>Stream start time</h3>
+    <p>Enter the time the stream started, in <b>Eastern time (EST/EDT)</b>. Clip elapsed times are measured from this. Defaults to right now.</p>
+    <div class="start-row">
+      <input type="time" id="start-input" step="1" oninput="updateStartHint()" />
+      <button class="ghost" type="button" onclick="startInputToNow()">Use now</button>
+    </div>
+    <p class="start-hint" id="start-hint"></p>
+    <div class="row">
+      <button class="ghost" onclick="closeStreamStart()">Cancel</button>
+      <button class="ghost" onclick="clearStreamStart()" style="border-color:var(--danger);color:var(--danger)">Clear start</button>
+      <button class="primary" onclick="saveStreamStart()">Save</button>
+    </div>
   </div>
 </div>
 
 <script>
-  // ---------------- In-browser mock engine (no server) ----------------
-  let state = { queue: [], fulfilled: [], cancelled: [], stats: {}, config: { priorityItems: [] } };
-  let live = false;
-  let priorityItems = ['break','slab'];
-  let bumpedBuyerId = null;
-  let tick = 1, idc = 1;
-  const orders = [];        // active orders
-  const fulfilledRecs = []; // {key,buyer,buyerId,itemCount,total,orderIds,_orders}
-  const cancelledRecs = [];
+  // Live-feed connection with explicit, never-give-up reconnection.
+  const socket = io('/panel', {
+    reconnection: true,
+    reconnectionAttempts: Infinity,
+    reconnectionDelay: 500,
+    reconnectionDelayMax: 5000,
+    timeout: 20000,
+  });
+  let state = { queue: [], fulfilled: [], stats: {}, config: { priorityItems: [] } };
 
-  function genId(){ return '576856' + String(10000000 + (idc++)*37).padStart(11,'0'); }
+  // ---- Live-feed resilience -------------------------------------------------
+  // If the socket feed silently drops (tab backgrounded, laptop asleep, wifi
+  // blip, instance recycle) the page would otherwise sit on stale data and look
+  // "frozen" while the server is actually fine. These handlers reconnect, pull a
+  // fresh snapshot the moment we're back, and show a clear status so a stale
+  // page is never mistaken for a live one.
+  let __lastState = Date.now();
+  function setConn(ok){
+    const el = document.getElementById('connDot');
+    if(!el) return;
+    el.className = 'conn' + (ok ? ' ok' : '');
+    el.textContent = ok ? '● Live feed' : '● Reconnecting…';
+    el.title = ok ? 'Live feed connected — orders update in real time.'
+                  : 'Live feed lost — trying to reconnect. Orders shown may be out of date until this turns green.';
+  }
+  async function resync(){
+    try{
+      const s = await fetch('/api/state', { cache: 'no-store' }).then(r => r.ok ? r.json() : null);
+      if(s){ state = s; __lastState = Date.now(); render(); }
+    }catch(e){}
+  }
+  socket.on('state', (s) => { state = s; __lastState = Date.now(); setConn(true); render(); });
+  socket.on('connect', () => { setConn(true); resync(); });
+  socket.on('disconnect', () => { setConn(false); });
+  socket.io.on('reconnect', () => { setConn(true); resync(); });
+  socket.io.on('reconnect_attempt', () => { setConn(false); });
+  socket.on('connect_error', () => { setConn(false); });
+  function kick(){ try{ if(!socket.connected) socket.connect(); }catch(e){} resync(); }
+  document.addEventListener('visibilitychange', () => { if(document.visibilityState === 'visible') kick(); });
+  window.addEventListener('online', kick);
+  window.addEventListener('focus', kick);
+  setInterval(() => { if(Date.now() - __lastState > 45000) kick(); }, 15000);
+
   function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
   function money(n){return '$'+Number(n||0).toFixed(2);}
+  // Shortened order # for the compact queue rows — last 8 digits, with a leading
+  // ellipsis so it's clearly a partial. Full numbers stay in the expanded view,
+  // the printed label, and the CSV export.
   function shortId(id){ const s=String(id); return s.length>8 ? '…'+s.slice(-8) : s; }
-  function isPri(items){ return items.some(it=> priorityItems.some(p=> p && it.name.toLowerCase().includes(p.toLowerCase()))); }
-  function mergeItems(os){ const m=new Map(); for(const o of os) for(const it of o.items){ m.set(it.name,(m.get(it.name)||0)+it.qty);} return [...m].map(([name,qty])=>({name,qty})); }
-  function qtyCount(os){ return os.reduce((s,o)=>s+o.items.reduce((x,i)=>x+i.qty,0),0); }
-
-  function activeSlots(){
-    const map=new Map();
-    for(const o of orders){ if(!map.has(o.buyerId)) map.set(o.buyerId,[]); map.get(o.buyerId).push(o); }
-    const slots=[];
-    for(const [buyerId,os] of map){
-      os.sort((a,b)=>a.createdAt-b.createdAt);
-      const priTimes=os.filter(o=>isPri(o.items)).map(o=>o.createdAt);
-      const reCount=os.filter(o=>o.mergedWhileTop).length;
-      slots.push({
-        key:buyerId, buyerId, buyer:os[0].buyer, items:mergeItems(os), total:os.reduce((s,o)=>s+o.total,0),
-        orderIds:os.map(o=>o.id), orderCount:os.length, isPriority:priTimes.length>0,
-        priorityAt: priTimes.length?Math.min(...priTimes):Infinity, createdAt:os[0].createdAt,
-        reorderedAtTop:reCount>0, reorderedAtTopCount:reCount, onHold:os.some(o=>o.onHold),
-        priorFulfilled: fulfilledRecs.filter(r=>r.buyerId===buyerId).reduce((s,r)=>s+r.orderIds.length,0),
-        bumped: bumpedBuyerId===buyerId,
-        orderLines: os.map(o=>({id:o.id, items:o.items, addedSinceTop:!!o.mergedWhileTop}))
-      });
-    }
-    slots.sort((a,b)=>{
-      if(a.bumped!==b.bumped) return a.bumped?-1:1;
-      if(a.isPriority!==b.isPriority) return a.isPriority?-1:1;
-      if(a.isPriority) return a.priorityAt-b.priorityAt;
-      return a.createdAt-b.createdAt;
-    });
-    slots.forEach((s,i)=>s.position=i+1);
-    return slots;
-  }
-  function computeState(){
-    const q=activeSlots();
-    state={ queue:q, fulfilled:fulfilledRecs.slice().reverse(), cancelled:cancelledRecs.slice().reverse(),
-      config:{priorityItems},
-      stats:{ live, activeCount:q.length, priorityCount:q.filter(e=>e.isPriority).length,
-        activeValue:q.reduce((s,e)=>s+e.total,0), fulfilledCount:fulfilledRecs.reduce((s,r)=>s+r.orderIds.length,0) } };
-  }
-  function commit(){ computeState(); render(); }
-
-  function pushOrder(buyer, buyerId, items, total, onHold){
-    const slots=activeSlots(); const top=slots[0];
-    const hasActive=orders.some(o=>o.buyerId===buyerId);
-    const mergedWhileTop = hasActive && top && top.buyerId===buyerId;
-    orders.push({ id:genId(), buyerId, buyer, items, total, createdAt:tick++, onHold:!!onHold, mergedWhileTop });
-    commit();
-  }
-  function removeByBuyer(buyerId){ for(let i=orders.length-1;i>=0;i--) if(orders[i].buyerId===buyerId) orders.splice(i,1); }
-
-  // ---------------- Actions (local) ----------------
-  function fulfill(key){
-    const os=orders.filter(o=>o.buyerId===key); if(!os.length) return;
-    fulfilledRecs.push({ key:'F'+(idc++), buyer:os[0].buyer, buyerId:key, itemCount:qtyCount(os),
-      total:os.reduce((s,o)=>s+o.total,0), orderIds:os.map(o=>o.id), _orders:os.map(o=>({...o})) });
-    removeByBuyer(key); if(bumpedBuyerId===key) bumpedBuyerId=null; commit();
-  }
-  function bump(key){ bumpedBuyerId = key; commit(); }
-  async function removeOrder(key){
-    if(!(await uiConfirm({title:'Remove this order from the queue?',
-      body:'Use this if the buyer cancelled. It leaves the queue and is not counted as fulfilled.',
-      confirmText:'Remove order', danger:true}))) return;
-    const os=orders.filter(o=>o.buyerId===key); if(!os.length) return;
-    cancelledRecs.push({ key:'C'+(idc++), buyer:os[0].buyer, buyerId:key, itemCount:qtyCount(os),
-      total:os.reduce((s,o)=>s+o.total,0), orderIds:os.map(o=>o.id), _orders:os.map(o=>({...o})) });
-    removeByBuyer(key); if(bumpedBuyerId===key) bumpedBuyerId=null; commit();
-  }
-  function reopenOrder(key){
-    const list = key[0]==='C' ? cancelledRecs : fulfilledRecs;
-    const i=list.findIndex(r=>r.key===key); if(i<0) return;
-    const rec=list[i];
-    if(orders.some(o=>o.buyerId===rec.buyerId)){ alert("That buyer already has a newer order in the queue, so it can't merge back automatically."); return; }
-    for(const o of rec._orders){ o.mergedWhileTop=false; orders.push(o); }
-    list.splice(i,1); commit();
-  }
-  async function toggleLive(){
-    if(!live){ if(!(await uiConfirm({title:'Start a new live?', body:'Begins accepting orders. (In the sandbox, orders can be added anytime.)', confirmText:'Go live'}))) return; live=true; }
-    else { if(!(await uiConfirm({title:'End the live?', body:'In the real panel this archives the stream to Past streams and clears the board. In the sandbox it just flips the badge.', confirmText:'End live', danger:true}))) return; live=false; }
-    commit();
-  }
-  async function resetQueue(){
-    if(!(await uiConfirm({title:'Reset the entire board?', body:'Clears every active, fulfilled, and cancelled order. (Sandbox only — nothing real.)', confirmText:'Yes, reset', danger:true}))) return;
-    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null;commit();
+  // Human duration from milliseconds: "0s", "45s", "2m 14s", "1h 03m".
+  function fmtDur(ms){
+    if(ms==null || isNaN(ms) || ms<0) return '—';
+    const s=Math.floor(ms/1000);
+    if(s<60) return s+'s';
+    const m=Math.floor(s/60), ss=s%60;
+    if(m<60) return m+'m '+String(ss).padStart(2,'0')+'s';
+    const h=Math.floor(m/60), mm=m%60;
+    return h+'h '+String(mm).padStart(2,'0')+'m';
   }
 
-  // ---------------- Confirm modal ----------------
+  async function post(url){ await fetch(url,{method:'POST'}); }
+  function fulfill(key){ post('/api/fulfill/'+encodeURIComponent(key)); }
+  function bump(key){ post('/api/bump/'+encodeURIComponent(key)); }
+
+  // Deliberate confirmation modal (returns a Promise<boolean>). Used for the
+  // destructive actions — Reset, End Live, Remove — so they can't be blown
+  // through by a stray click the way a native confirm() sometimes can.
   function uiConfirm({title, body, confirmText='Confirm', danger=false}){
     return new Promise((resolve)=>{
       const m=document.getElementById('confirmModal');
       document.getElementById('cm-title').textContent=title;
       document.getElementById('cm-body').textContent=body;
-      const ok=document.getElementById('cm-ok'), cancel=document.getElementById('cm-cancel');
-      ok.textContent=confirmText; ok.className=danger?'danger':'primary'; m.classList.add('open');
+      const ok=document.getElementById('cm-ok');
+      const cancel=document.getElementById('cm-cancel');
+      ok.textContent=confirmText;
+      ok.className = danger ? 'danger' : 'primary';
+      m.classList.add('open');
       const done=(v)=>{ m.classList.remove('open'); ok.onclick=null; cancel.onclick=null; resolve(v); };
-      ok.onclick=()=>done(true); cancel.onclick=()=>done(false);
+      ok.onclick=()=>done(true);
+      cancel.onclick=()=>done(false);
     });
   }
 
-  // ---------------- Label (real, client-side) ----------------
+  // Remove an order from the queue without fulfilling it (e.g. buyer cancelled).
+  async function removeOrder(key){
+    if(await uiConfirm({title:'Remove this order from the queue?',
+      body:'Use this if the buyer cancelled. The order leaves the queue and is NOT counted as fulfilled or exported.',
+      confirmText:'Remove order', danger:true}))
+      await post('/api/remove/'+encodeURIComponent(key));
+  }
+  // Undo an accidental fulfill: move the order back into the active queue.
+  async function reopenOrder(key){
+    try {
+      const r = await fetch('/api/reopen/'+encodeURIComponent(key), {method:'POST'});
+      const j = await r.json().catch(()=>({}));
+      if(!j.ok) alert("Couldn't undo this one — that buyer already has a newer order in the queue, so it can't merge back automatically.");
+    } catch(e){ /* ignore */ }
+  }
+
+  // --- Thermal bag label (2.25" x 1.25") ---
+  // Renders username + order number(s) into an off-screen iframe whose page size
+  // is locked to the label, auto-shrinks the text to fit, and opens the print
+  // dialog. Pick your thermal printer there (set it as default to make it 1 click).
   function printLabel(key){
-    const e=(state.queue||[]).find(x=>x.key===key); if(!e) return;
-    const uname=e.buyer||'Buyer'; const ords=(e.orderIds||[]);
-    const ordLine=ords.map(id=>'#'+id).join('   ');
-    const countLine=(e.orderCount>1)?(e.orderCount+' orders in this batch'):'';
-    const flags=[]; if(e.priorFulfilled>0) flags.push('EARLIER ORDERS TODAY');
-    const dupe=(state.queue||[]).filter(x=>(x.buyer||'').toLowerCase()===uname.toLowerCase()).length>1;
-    const idTag=dupe?('id …'+String(e.buyerId||'').slice(-4)):'';
-    const doc=`<!DOCTYPE html><html><head><meta charset="utf-8"><style>
-      @page{size:2.25in 1.25in;margin:0} html,body{margin:0;padding:0;width:2.25in;height:1.25in}
-      body{display:flex;flex-direction:column;justify-content:center;align-items:center;box-sizing:border-box;padding:0.05in 0.08in;font-family:Arial,Helvetica,sans-serif;text-align:center;color:#000;background:#fff;overflow:hidden}
-      .flag{border:1.5px solid #000;color:#000;font-weight:800;font-size:8.5px;padding:1px 6px;border-radius:3px;letter-spacing:.4px;margin-bottom:3px;white-space:nowrap}
-      .uname{font-weight:800;line-height:1.03;max-width:100%} .idtag{font-size:8px;font-weight:700;margin-top:1px}
+    const e = (state.queue||[]).find(x=>x.key===key);
+    if(!e) return;
+    const uname = e.buyer || 'Buyer';
+    const ords = (e.orderIds||[]);
+    const ordLine = ords.map(id=>'#'+id).join('   ');
+    const countLine = (e.orderCount>1) ? (e.orderCount+' orders in this batch') : '';
+    // Thermal printers only lay down BLACK, and browsers skip background fills
+    // unless "Background graphics" is on — so flags are black text in a black
+    // outline (no fill, no emoji) to guarantee they print. Multiple can stack.
+    const flags = [];
+    if(e.priorFulfilled>0) flags.push('EARLIER ORDERS TODAY');
+    // Same-name distinction: if another buyer in the queue shares this exact
+    // display name, print a last-4 id tag so the right bag goes to the right person.
+    const dupe = (state.queue||[]).some(x=>(x.buyer||'').toLowerCase()===uname.toLowerCase() && x.buyerId!==e.buyerId);
+    const idTag = dupe ? ('id …'+String(e.buyerId||'').slice(-4)) : '';
+    const doc = `<!DOCTYPE html><html><head><meta charset="utf-8"><style>
+      @page{size:2.25in 1.25in;margin:0}
+      html,body{margin:0;padding:0;width:2.25in;height:1.25in}
+      body{display:flex;flex-direction:column;justify-content:center;align-items:center;
+        box-sizing:border-box;padding:0.05in 0.08in;font-family:Arial,Helvetica,sans-serif;
+        text-align:center;color:#000;background:#fff;overflow:hidden}
+      .flag{border:1.5px solid #000;color:#000;background:#fff;font-weight:800;font-size:8.5px;
+        padding:1px 6px;border-radius:3px;letter-spacing:.4px;margin-bottom:3px;white-space:nowrap}
+      .uname{font-weight:800;line-height:1.03;word-break:break-word;max-width:100%}
+      .idtag{font-size:8px;font-weight:700;color:#000;margin-top:1px}
       .count{font-size:10px;font-weight:700;margin-top:2px;text-transform:uppercase;letter-spacing:.4px}
-      .ord{margin-top:5px;font-family:'Courier New',monospace;font-weight:700;line-height:1.15;word-break:break-all;max-width:100%}
+      .ord{margin-top:5px;font-family:'Courier New',monospace;font-weight:700;line-height:1.15;
+        word-break:break-all;max-width:100%}
     </style></head><body>
       ${flags.map(f=>`<div class="flag">${esc(f)}</div>`).join('')}
       <div class="uname" id="u">${esc(uname)}</div>
       ${idTag?`<div class="idtag">${esc(idTag)}</div>`:''}
       ${countLine?`<div class="count">${esc(countLine)}</div>`:''}
       ${ordLine?`<div class="ord" id="o">${esc(ordLine)}</div>`:''}
-      <scr`+`ipt>(function(){function sh(el,st,mn){var s=st;el.style.fontSize=s+'px';while(s>mn&&el.scrollWidth>el.clientWidth){s--;el.style.fontSize=s+'px';}return s;}var u=document.getElementById('u');var o=document.getElementById('o');u.style.whiteSpace='nowrap';var us=sh(u,30,13);if(u.scrollWidth>u.clientWidth)u.style.whiteSpace='normal';if(o)sh(o,13,7);window.focus();setTimeout(function(){window.print();},60);})();</scr`+`ipt>
+      <script>(function(){
+        function shrinkWidth(el,start,min){var s=start;el.style.fontSize=s+'px';
+          while(s>min && el.scrollWidth>el.clientWidth){s--;el.style.fontSize=s+'px';}return s;}
+        var b=document.body;
+        var u=document.getElementById('u');var o=document.getElementById('o');
+        // Username: prefer it on ONE line — force no-wrap and shrink to fit the
+        // width. Only if it's still too wide at the floor do we allow a wrap,
+        // so normal names never break mid-word (e.g. "test_collector").
+        u.style.whiteSpace='nowrap';
+        var us=shrinkWidth(u,30,13);
+        if(u.scrollWidth>u.clientWidth){ u.style.whiteSpace='normal'; } // very long name -> wrap at floor
+        var os=o?shrinkWidth(o,13,7):0;
+        // Overall height fit (rare, e.g. many order numbers): shrink the order
+        // line first, then the name. overflow:hidden clips anything left over so
+        // a label never bleeds past its 2.25x1.25 area.
+        var guard=0;
+        while(b.scrollHeight>b.clientHeight && guard<120){
+          if(o && os>7){ os--; o.style.fontSize=os+'px'; }
+          else if(us>9){ us--; u.style.fontSize=us+'px'; }
+          else break;
+          guard++;
+        }
+        window.focus();
+        setTimeout(function(){window.print();},60);
+      })();<\/script>
     </body></html>`;
-    let f=document.getElementById('labelFrame');
-    if(!f){ f=document.createElement('iframe'); f.id='labelFrame'; f.style.cssText='position:fixed;left:-10000px;top:0;width:2.4in;height:1.4in;border:0;background:#fff'; document.body.appendChild(f); }
-    f.srcdoc=doc;
+    let f = document.getElementById('labelFrame');
+    if(!f){
+      f = document.createElement('iframe');
+      f.id = 'labelFrame';
+      f.style.cssText = 'position:fixed;left:-10000px;top:0;width:2.4in;height:1.4in;border:0;background:#fff';
+      document.body.appendChild(f);
+    }
+    f.srcdoc = doc;
+  }
+  async function toggleLive(){
+    const live = (state.stats||{}).live;
+    if(!live){
+      if(!(await uiConfirm({title:'Start a new live?',
+        body:'This starts a fresh stream and begins accepting new orders. Anything left from a previous stream that wasn\'t ended is archived to Past streams first.',
+        confirmText:'Go live', danger:false}))) return;
+      await post('/api/live/on');
+    } else {
+      const n = (state.stats||{}).activeCount||0;
+      const body = n>0
+        ? `You still have ${n} order${n===1?'':'s'} in the queue that ${n===1?"hasn't":"haven't"} been fulfilled. Ending will archive EVERYTHING (fulfilled, cancelled, and those ${n} unfulfilled) to Past streams and clear the board. New orders stop entering.`
+        : 'This archives this stream (fulfilled + cancelled) to Past streams and clears the board. New orders stop entering. You can review or export it anytime from Past streams.';
+      if(!(await uiConfirm({title:'End the live?', body, confirmText:'End live', danger:true}))) return;
+      await post('/api/live/off');
+    }
+  }
+  async function resetQueue(){
+    if(await uiConfirm({title:'Reset the entire queue?',
+      body:'This clears every active AND fulfilled order for the current stream. Priority words are kept. This cannot be undone.',
+      confirmText:'Yes, reset everything', danger:true}))
+      await post('/api/reset');
   }
 
-  // ---------------- Priority modal ----------------
-  function openPriority(){ document.getElementById('pri-input').value=priorityItems.join('\n'); document.getElementById('modal').classList.add('open'); }
+  // Show/hide the active priority-keyword chip row on the admin page. Preference
+  // is per-device (localStorage); default is shown. Toggling only affects the
+  // chip display — it never changes which keywords are active.
+  function applyPriChipsPref(){
+    let hidden = false;
+    try{ hidden = localStorage.getItem('adminPriChipsHidden') === '1'; }catch(e){}
+    const box = document.getElementById('pri-chips'); if(box) box.style.display = hidden ? 'none' : '';
+    const cb = document.getElementById('pri-show-chips'); if(cb) cb.checked = !hidden;
+  }
+  function togglePriChips(){
+    const cb = document.getElementById('pri-show-chips');
+    const hidden = cb ? !cb.checked : false;
+    try{ localStorage.setItem('adminPriChipsHidden', hidden ? '1' : '0'); }catch(e){}
+    const box = document.getElementById('pri-chips'); if(box) box.style.display = hidden ? 'none' : '';
+  }
+  function openPriority(){
+    document.getElementById('pri-input').value = (state.config.priorityItems||[]).join('\n');
+    applyPriChipsPref();
+    document.getElementById('modal').classList.add('open');
+  }
   function closePriority(){ document.getElementById('modal').classList.remove('open'); }
-  function savePriority(){ priorityItems=document.getElementById('pri-input').value.split('\n').map(s=>s.trim()).filter(Boolean); closePriority(); commit(); }
-
-  // ---------------- Rendering (mirrors the real panel) ----------------
-  const slotNodes=new Map(); const expandedKeys=new Set(); let fulfilledSig='', cancelledSig='';
-  let fulfilledCollapsed=false, cancelledCollapsed=false;
-  function toggleSection(w){ if(w==='fulfilled') fulfilledCollapsed=!fulfilledCollapsed; else cancelledCollapsed=!cancelledCollapsed; applyCollapse(); }
-  function applyCollapse(){
-    const fEl=document.getElementById('fulfilled'),cEl=document.getElementById('cancelled'),fh=document.getElementById('fhead'),ch=document.getElementById('chead');
-    if(fEl) fEl.style.display=fulfilledCollapsed?'none':''; if(fh) fh.classList.toggle('collapsed',fulfilledCollapsed);
-    if(cEl) cEl.style.display=cancelledCollapsed?'none':''; if(ch) ch.classList.toggle('collapsed',cancelledCollapsed);
+  async function savePriority(){
+    const items = document.getElementById('pri-input').value.split('\n').map(s=>s.trim()).filter(Boolean);
+    await fetch('/api/priority-items',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({items})});
+    closePriority();
   }
-  function toggleExpand(key){ if(expandedKeys.has(key)) expandedKeys.delete(key); else expandedKeys.add(key); const n=slotNodes.get(key); if(n) n.classList.toggle('expanded',expandedKeys.has(key)); }
+
+  // --- In-place list rendering so updates don't flash ---
+  const slotNodes = new Map(); // key -> element (reused across updates)
+  const expandedKeys = new Set(); // slots the user has expanded to see all items
+  let fulfilledSig = '';
+  let cancelledSig = '';
+
+  // Collapse/expand the Fulfilled + Cancelled sections (state kept in memory so
+  // it persists across live updates).
+  let fulfilledCollapsed=false, cancelledCollapsed=false;
+  function toggleSection(which){
+    if(which==='fulfilled') fulfilledCollapsed=!fulfilledCollapsed; else cancelledCollapsed=!cancelledCollapsed;
+    applyCollapse();
+  }
+  function applyCollapse(){
+    const fEl=document.getElementById('fulfilled'), cEl=document.getElementById('cancelled');
+    const fh=document.getElementById('fhead'), ch=document.getElementById('chead');
+    if(fEl) fEl.style.display=fulfilledCollapsed?'none':'';
+    if(fh) fh.classList.toggle('collapsed',fulfilledCollapsed);
+    if(cEl) cEl.style.display=cancelledCollapsed?'none':'';
+    if(ch) ch.classList.toggle('collapsed',cancelledCollapsed);
+  }
+
+  // Toggle the inline "all items" panel for a slot. Purely visual — flips a
+  // class, so it survives live updates (we re-apply from expandedKeys on render).
+  function toggleExpand(key){
+    if(expandedKeys.has(key)) expandedKeys.delete(key); else expandedKeys.add(key);
+    const node = slotNodes.get(key);
+    if(node) node.classList.toggle('expanded', expandedKeys.has(key));
+  }
 
   function slotInner(e){
-    const itemStr=e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
-    const priBadge=e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
-    const countBadge=`<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
-    const raCount=e.reorderedAtTopCount||0;
-    const reorderBadge=(raCount>0&&e.position===1)?`<span class="badge reorder" title="Ordered again while at the TOP — add to the bag in progress.">＋ ADDED MORE${raCount>1?' ×'+raCount:''}</span>`:'';
-    const backBadge=(e.priorFulfilled>0)?`<span class="badge back" title="Already had order(s) fulfilled earlier this stream.">🔁 ${e.priorFulfilled} earlier today</span>`:'';
-    const dupBadge=e._dupName?`<span class="badge samename" title="Another buyer shares this exact display name.">⚠ SAME NAME</span>`:'';
-    const holdBadge=e.onHold?`<span class="badge hold" title="On hold — usually a buyer cancel request. Check before shipping.">⚠ CANCEL REQ</span>`:'';
-    const idTag=e._dupName?`<span class="idtag">id …${esc(e._idTag)}</span>`:'';
-    const ordNos=`<span class="ordno">${e.orderIds.map(id=>'#'+esc(shortId(id))).join(' ')}</span>`;
-    const lines=e.orderLines||e.orderIds.map(id=>({id,items:e.items,addedSinceTop:false}));
-    const multi=lines.length>1;
-    const itemRow=(i)=>`<div class="di"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span></div>`;
-    const groupHtml=(l)=>(multi?`<div class="dgh">#${esc(shortId(l.id))}</div>`:'')+(l.items||[]).map(itemRow).join('');
-    const base=lines.filter(l=>!l.addedSinceTop), added=lines.filter(l=>l.addedSinceTop);
-    let detailItems=base.map(groupHtml).join('');
-    if(added.length) detailItems+=`<div class="dsub">＋ Added since top of queue</div>`+added.map(groupHtml).join('');
-    const detailOrds=`<div class="dord">Full order number${e.orderIds.length>1?'s':''}: ${e.orderIds.map(id=>'#'+esc(id)).join('  ')}</div>`;
+    const itemStr = e.items.map(i=>`${i.qty}× ${i.name}`).join(', ');
+    const priBadge = e.isPriority?'<span class="badge pri">PRIORITY</span>':'';
+    const countBadge = `<span class="badge multi">${e.orderCount} order${e.orderCount===1?'':'s'}</span>`;
+    // Loud heads-up: this buyer ordered AGAIN while already at the top (bag likely
+    // in progress). Only flash it while they're CURRENTLY #1 — the one being
+    // packed right now; if a bump/priority pushes them down it stops flashing.
+    const raCount = e.reorderedAtTopCount || 0;
+    const reorderBadge = (raCount > 0 && e.position === 1)
+      ? `<span class="badge reorder" title="This buyer ordered again while at the TOP of the queue — they likely have a bag being packed. Add the new item(s) to it. The ×N counts how many times they've added while at the top, so a higher number means more came in since you last checked.">＋ ADDED MORE${raCount>1?' ×'+raCount:''}</span>` : '';
+    const backBadge = (e.priorFulfilled>0)
+      ? `<span class="badge back" title="This buyer already had ${e.priorFulfilled} order(s) fulfilled earlier this stream — check whether this should be combined">🔁 ${e.priorFulfilled} earlier today</span>` : '';
+    // Two different buyers sharing an identical display name — flag + id tag.
+    const dupBadge = e._dupName ? `<span class="badge samename" title="Another buyer in the queue has this exact display name — these are different people. Use the order numbers / id to keep them separate.">⚠ SAME NAME</span>` : '';
+    // A genuine cancellation was requested (whole order, or a specific item that's
+    // highlighted in the expanded view). This is the loud red one.
+    const cancelBadge = e.cancelRequested ? `<span class="badge hold" title="A cancellation was requested for this order — expand it to see exactly which item(s). Do NOT ship / seal the bag until you've pulled the cancelled item(s).">⚠ CANCEL REQ</span>` : '';
+    // TikTok put the order On Hold for some OTHER reason (address check, order
+    // combine/split, sample/exchange, or a pending review). Not a cancellation —
+    // just a soft heads-up to verify before shipping. Suppressed if a real cancel
+    // is already flagged.
+    const holdBadge = (!e.cancelRequested && e.onHold) ? `<span class="badge onhold" title="TikTok has this order ON HOLD — this is NOT necessarily a cancellation. Common reasons: address check, order combine/split, sample or exchange order, or a pending review. Verify before shipping.">⏸ ON HOLD — verify</span>` : '';
+    const idTag = e._dupName ? `<span class="idtag" title="Buyer id (last 4) — tells same-named buyers apart">id …${esc(e._idTag)}</span>` : '';
+    const ordNos = `<span class="ordno">${e.orderIds.map(id=>'#'+esc(shortId(id))).join(' ')}</span>`;
+    // Expanded view: items grouped by order number, with anything the buyer added
+    // after hitting #1 pulled out under a green "Added since top of queue" header.
+    const lines = e.orderLines || e.orderIds.map(id=>({id, items:e.items, addedSinceTop:false}));
+    const multi = lines.length > 1;
+    const itemRow = (i)=>`<div class="di${i.cancelled?' di-cancel':''}"><span class="diq">${i.qty}×</span><span>${esc(i.name)}</span>${i.cancelled?'<span class="cxflag">⚠ CANCEL REQUESTED</span>':''}</div>`;
+    const groupHtml = (l)=> (multi?`<div class="dgh">#${esc(shortId(l.id))}</div>`:'') + (l.items||[]).map(itemRow).join('');
+    const base = lines.filter(l=>!l.addedSinceTop);
+    const added = lines.filter(l=>l.addedSinceTop);
+    let detailItems = base.map(groupHtml).join('');
+    if(added.length){
+      detailItems += `<div class="dsub">＋ Added since top of queue</div>` + added.map(groupHtml).join('');
+    }
+    const detailOrds = `<div class="dord">Full order number${e.orderIds.length>1?'s':''}: ${e.orderIds.map(id=>'#'+esc(id)).join('  ')}</div>`;
+    // Admin-only cross-check: the queue shows the buyer's DISPLAY NAME; the
+    // expanded view reveals their actual USERNAME so admins can cross-reference
+    // (two people can share a display name). Never shown on the public page.
+    const who = `<div class="dwho">Username: `
+      + (e.buyerHandle ? `<b>${esc(e.buyerHandle)}</b>` : `<span style="color:#8b93a7">not provided by TikTok</span>`)
+      + `</div>`;
     return `<div class="slotmain">`
-      +`<button class="removeb" title="Remove (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
-      +`<div class="pos">${e.position}</div>`
-      +`<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
-      +`<div class="items">${esc(itemStr)}</div></div>`
-      +`<button class="caret" title="Show every item" onclick="toggleExpand('${e.key}')">▸</button>`
-      +`<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
-      +`<div class="money">${money(e.total)}</div>`
-      +`<div class="actions">${(e.bumped||e.position===1)?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
-      +`<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`
-      +`</div><div class="details">${detailItems}${detailOrds}</div>`;
+      + `<button class="removeb" title="Remove from queue (e.g. buyer cancelled)" onclick="removeOrder('${e.key}')">✕</button>`
+      + `<div class="pos">${e.position}</div>`
+      + `<div class="who"><div class="name">${esc(e.buyer)} ${idTag} ${priBadge} ${countBadge} ${cancelBadge} ${holdBadge} ${reorderBadge} ${dupBadge} ${backBadge} ${ordNos}</div>`
+      + `<div class="items">${esc(itemStr)}</div>`
+      + `<div class="qtime"><span class="qtimer" data-key="${esc(e.key)}" data-since="${e.firstOrderAt||''}"></span></div></div>`
+      + `<button class="caret" title="Show/hide every item in this order" onclick="toggleExpand('${e.key}')">▸</button>`
+      + `<button class="labelb" title="Print 2.25×1.25 label" onclick="printLabel('${e.key}')">🏷 Label</button>`
+      + `<div class="money">${money(e.total)}</div>`
+      + `<div class="actions">${(e.bumped||e.position===1)?'':`<button class="bumpb" title="Bump to top" onclick="bump('${e.key}')">▲</button>`}`
+      + `<button class="fulfill" onclick="fulfill('${e.key}')">✓ Fulfilled</button></div>`
+      + `</div>`
+      + `<div class="details">${detailItems}${who}${detailOrds}</div>`;
   }
-  function slotSig(e){ return [e.position,e.buyer,e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,e.reorderedAtTopCount||0,e.onHold?1:0,e._dupName?1:0,e._idTag||'',e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name).join('|')].join('~'); }
+  function slotSig(e){
+    return [e.position,e.buyer,e.buyerHandle||'',e.isPriority,e.bumped,e.orderCount,e.total,e.priorFulfilled||0,
+      e.reorderedAtTop?1:0,e.reorderedAtTopCount||0,e.onHold?1:0,e.cancelRequested?1:0,e._dupName?1:0,e._idTag||'',
+      e.firstOrderAt||'',e.reachedTopAt||'',
+      e.orderIds.join(','),e.items.map(i=>i.qty+'x'+i.name+(i.cancelled?'!x':'')).join('|')].join('~');
+  }
+  // Tick every live slot's timer text in place (no re-render, so it never fights
+  // the diff). "In queue" = since first order; "at top" = since it hit #1.
+  function tickTimers(){
+    const now = Date.now();
+    const topKey = window.__topKey || null;
+    const topSince = window.__topSince || 0;
+    document.querySelectorAll('.qtimer').forEach(el=>{
+      const since = Number(el.dataset.since)||0;
+      if(!since){ el.textContent=''; return; }
+      let html = '⏱ in queue '+fmtDur(now-since);
+      // "at top" only runs for whoever is CURRENTLY #1, timed from when they took
+      // the top spot — so a slot bumped down by a priority order stops showing it
+      // and restarts if it returns to #1.
+      if(topSince && el.dataset.key === topKey){
+        html += ' &nbsp;·&nbsp; <span class="qtop">at top '+fmtDur(now-topSince)+'</span>';
+      }
+      el.innerHTML = html;
+    });
+    // Live "running for" clock on the Stream Clips card (updates every second
+    // without rebuilding the clip list).
+    const runEl = document.getElementById('clip-run');
+    if(runEl && window.__streamStart){ runEl.textContent = fmtElapsedHMS(Date.now() - window.__streamStart); }
+  }
+  setInterval(tickTimers, 1000);
+
+  // ───────────────────────── Stream clips (editor aid) ─────────────────────────
+  const ET = 'America/New_York'; // Eastern time (auto EST/EDT) — PBCC runs on Eastern
+  async function postClip(url, body){ return fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(body||{})}); }
+  function fmtClock(ms){
+    if(!ms) return '—';
+    try{ return new Date(Number(ms)).toLocaleTimeString('en-US',{timeZone:ET,hour:'numeric',minute:'2-digit',second:'2-digit',hour12:true}); }
+    catch(e){ return '—'; }
+  }
+  function fmtElapsedHMS(ms){
+    if(ms==null||isNaN(ms)) return '0:00:00';
+    let s=Math.max(0,Math.floor(ms/1000));
+    const h=Math.floor(s/3600); s-=h*3600; const m=Math.floor(s/60); s-=m*60;
+    return h+':'+String(m).padStart(2,'0')+':'+String(s).padStart(2,'0');
+  }
+  function parseElapsed(str){
+    const parts=String(str).trim().split(':').map(x=>x.trim());
+    if(!parts.length || parts.some(p=>p==='' || isNaN(Number(p)))) return null;
+    let h=0,m=0,s=0;
+    if(parts.length===3){ h=+parts[0]; m=+parts[1]; s=+parts[2]; }
+    else if(parts.length===2){ m=+parts[0]; s=+parts[1]; }
+    else if(parts.length===1){ s=+parts[0]; }
+    else return null;
+    if([h,m,s].some(n=>isNaN(n)||n<0)) return null;
+    return ((h*3600)+(m*60)+s)*1000;
+  }
+  // Current Eastern wall time as "HH:MM:SS" (24h) for the <input type=time>.
+  function nowHMS(){
+    const p=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:ET,hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date()).map(x=>[x.type,x.value]));
+    return p.hour+':'+p.minute+':'+p.second;
+  }
+  // Convert an HH:MM:SS wall-clock time in Eastern, on TODAY's Eastern date, to
+  // epoch ms — DST-safe via offset correction (guess UTC, see the zone's wall
+  // time for that instant, correct by the difference).
+  function wallToEpoch(h,m,s){
+    const dp=Object.fromEntries(new Intl.DateTimeFormat('en-CA',{timeZone:ET,year:'numeric',month:'2-digit',day:'2-digit'}).formatToParts(new Date()).map(x=>[x.type,x.value]));
+    const guess=Date.UTC(+dp.year, +dp.month-1, +dp.day, h||0, m||0, s||0);
+    const zp=Object.fromEntries(new Intl.DateTimeFormat('en-US',{timeZone:ET,hour12:false,year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(guess)).map(x=>[x.type,x.value]));
+    let hh=+zp.hour; if(hh===24) hh=0;
+    const asZone=Date.UTC(+zp.year, +zp.month-1, +zp.day, hh, +zp.minute, +zp.second);
+    return guess + (guess - asZone);
+  }
+
+  function openStreamStart(){
+    const inp=document.getElementById('start-input');
+    if(state.streamStartAt){
+      const p=Object.fromEntries(new Intl.DateTimeFormat('en-GB',{timeZone:ET,hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}).formatToParts(new Date(state.streamStartAt)).map(x=>[x.type,x.value]));
+      inp.value=p.hour+':'+p.minute+':'+p.second;
+    } else { inp.value=nowHMS(); }
+    updateStartHint();
+    document.getElementById('startModal').classList.add('open');
+  }
+  function closeStreamStart(){ document.getElementById('startModal').classList.remove('open'); }
+  function startInputToNow(){ document.getElementById('start-input').value=nowHMS(); updateStartHint(); }
+  function startEpochFromInput(){
+    const v=document.getElementById('start-input').value; if(!v) return null;
+    const [h,m,s]=v.split(':').map(Number); return wallToEpoch(h,m,s||0);
+  }
+  function updateStartHint(){
+    const at=startEpochFromInput(); const hint=document.getElementById('start-hint');
+    if(at==null){ hint.textContent=''; return; }
+    const ago=Date.now()-at;
+    hint.textContent='Start = '+fmtClock(at)+'  ('+(ago<0?'in the future':'about '+fmtElapsedHMS(ago)+' ago')+')';
+  }
+  async function saveStreamStart(){
+    const at=startEpochFromInput();
+    if(at==null){ closeStreamStart(); return; }
+    await postClip('/api/stream-start',{at});
+    closeStreamStart();
+  }
+  async function clearStreamStart(){ await postClip('/api/stream-start',{clear:true}); closeStreamStart(); }
+  async function timeClip(){ if(!state.streamStartAt) return; await postClip('/api/clip',{}); }
+  async function deleteClipUI(id){ await postClip('/api/clip/'+encodeURIComponent(id)+'/delete',{}); }
+  async function clearClipsUI(){
+    if(!(state.clips||[]).length) return;
+    const ok=await uiConfirm({title:'Clear all clips?',body:'This deletes every clip in the list. The stream start time stays set.',confirmText:'Clear all',danger:true});
+    if(ok) await postClip('/api/clips/clear',{});
+  }
+  async function saveClipElapsed(id,val){
+    const start=state.streamStartAt; if(!start) return;
+    const ms=parseElapsed(val);
+    if(ms==null){ renderClips(true); return; } // invalid → revert to stored value
+    await postClip('/api/clip/'+encodeURIComponent(id),{at:start+ms});
+  }
+  async function saveClipNote(id,val){ await postClip('/api/clip/'+encodeURIComponent(id),{note:val}); }
+  function copyClips(){
+    const start=state.streamStartAt||null;
+    const clips=(state.clips||[]).slice().sort((a,b)=>(a.at||0)-(b.at||0));
+    const lines=clips.map((c,i)=>{
+      const el=start?fmtElapsedHMS(c.at-start):'—';
+      return (i+1)+'. '+el+'   '+fmtClock(c.at)+(c.note?'   — '+c.note:'');
+    });
+    const text=(start?('Stream start: '+fmtClock(start)+'\n\n'):'')+(lines.join('\n')||'(no clips)');
+    const done=()=>{ const b=document.getElementById('clip-copy'); const t=b.textContent; b.textContent='✓ Copied'; setTimeout(()=>b.textContent=t,1300); };
+    if(navigator.clipboard && navigator.clipboard.writeText){ navigator.clipboard.writeText(text).then(done).catch(()=>fallbackCopy(text,done)); }
+    else fallbackCopy(text,done);
+  }
+  function fallbackCopy(text,done){ const ta=document.createElement('textarea'); ta.value=text; ta.style.position='fixed'; ta.style.opacity='0'; document.body.appendChild(ta); ta.select(); try{document.execCommand('copy');}catch(e){} ta.remove(); done&&done(); }
+
+  // Collapse state for the clip list (remembered on this device) so a long list
+  // doesn't push the queue down during a busy stream.
+  let clipsCollapsed=false;
+  try{ clipsCollapsed = localStorage.getItem('clipsCollapsed')==='1'; }catch(e){}
+  function applyClipsCollapsed(){
+    const c=document.getElementById('clips-admin');
+    if(c) c.classList.toggle('collapsed', clipsCollapsed);
+  }
+  function toggleClips(){
+    clipsCollapsed=!clipsCollapsed;
+    try{ localStorage.setItem('clipsCollapsed', clipsCollapsed?'1':'0'); }catch(e){}
+    applyClipsCollapsed();
+  }
+
+  function renderClips(force){
+    const start=state.streamStartAt||null;
+    window.__streamStart=start;
+    const clips=(state.clips||[]).slice().sort((a,b)=>(a.at||0)-(b.at||0));
+    applyClipsCollapsed();
+    const nEl=document.getElementById('clip-n');
+    if(nEl) nEl.textContent = clips.length ? ('('+clips.length+')') : '';
+    const lbl=document.getElementById('clip-startlbl');
+    if(lbl){
+      if(start){ lbl.innerHTML='Start <b>'+esc(fmtClock(start))+'</b> · running <span class="run" id="clip-run">'+esc(fmtElapsedHMS(Date.now()-start))+'</span>'; }
+      else { lbl.textContent='Start time not set'; }
+    }
+    const take=document.getElementById('clip-take');
+    if(take){ take.disabled=!start; take.title=start?'Add a clip at the current time':'Set the stream start time first'; }
+    const list=document.getElementById('cliplist'); if(!list) return;
+    const sig=JSON.stringify([start, clips.map(c=>[c.id,c.at,c.note])]);
+    // Don't clobber a field the operator is editing; refresh once focus leaves.
+    if(!force && (list._sig===sig || list.contains(document.activeElement))) return;
+    list._sig=sig;
+    if(!clips.length){ list.innerHTML='<div class="clip-empty">No clips yet — hit ✂ Time Clip during the stream to mark a moment for the editor.</div>'; return; }
+    list.innerHTML=clips.map((c,i)=>{
+      const el=start?fmtElapsedHMS(c.at-start):'—';
+      return '<div class="cliprow">'
+        +'<span class="cidx">'+(i+1)+'</span>'
+        +'<span class="cclock" title="Clip time (Eastern)">'+esc(fmtClock(c.at))+'</span>'
+        +'<input class="celapsed" value="'+esc(el)+'" '+(start?'':'disabled')+' title="Elapsed since stream start — edit to adjust (h:mm:ss)" '
+          +'onchange="saveClipElapsed(\''+c.id+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()" />'
+        +'<input class="cnote" placeholder="note…" value="'+esc(c.note||'')+'" '
+          +'onchange="saveClipNote(\''+c.id+'\', this.value)" onkeydown="if(event.key===\'Enter\')this.blur()" />'
+        +'<button class="cdel" title="Delete this clip" onclick="deleteClipUI(\''+c.id+'\')">🗑</button>'
+      +'</div>';
+    }).join('');
+  }
+  // ── Active-queue pagination (client-side; no reload — just this area swaps) ──
+  const QUEUE_PAGE_SIZES = [10, 25, 50, 100];
+  // How many orders show per page. Defaults to 25; the operator can change it via
+  // the dropdown and the choice is remembered on this device.
+  let QUEUE_PAGE_SIZE = 25;
+  try { const saved = parseInt(localStorage.getItem('pbcc-page-size'), 10); if(QUEUE_PAGE_SIZES.includes(saved)) QUEUE_PAGE_SIZE = saved; } catch(e){}
+  let queuePage = 1;
+  let _lastQueueFilter = null;
+  function queueGoPage(n){ queuePage = n; renderQueue(); }
+  function setQueuePageSize(n){
+    n = parseInt(n, 10);
+    if(!QUEUE_PAGE_SIZES.includes(n)) return;
+    QUEUE_PAGE_SIZE = n;
+    try { localStorage.setItem('pbcc-page-size', String(n)); } catch(e){}
+    queuePage = 1; // jump back to the first page so the view isn't stranded past the end
+    renderQueue();
+  }
+  // Reflect the saved/default page size in the dropdown on load.
+  try { const _psel = document.getElementById('page-size'); if(_psel) _psel.value = String(QUEUE_PAGE_SIZE); } catch(e){}
+  function renderQueuePager(total, pages, start, end){
+    const el = document.getElementById('queue-pager'); if(!el) return;
+    if(pages <= 1){ el.style.display='none'; el.innerHTML=''; return; }
+    el.style.display='flex';
+    el.innerHTML =
+      `<button ${queuePage<=1?'disabled':''} onclick="queueGoPage(${queuePage-1})">‹ Prev</button>`
+      + `<span class="qpinfo">Showing ${start+1}–${end} of ${total} &nbsp;·&nbsp; Page ${queuePage} of ${pages}</span>`
+      + `<button ${queuePage>=pages?'disabled':''} onclick="queueGoPage(${queuePage+1})">Next ›</button>`;
+  }
   function renderQueue(){
-    const filter=(document.getElementById('search').value||'').toLowerCase();
-    const nameCounts={}; for(const e of (state.queue||[])){ const n=(e.buyer||'').toLowerCase(); nameCounts[n]=(nameCounts[n]||0)+1; }
-    const list=(state.queue||[]).filter(e=>!filter||e.buyer.toLowerCase().includes(filter));
-    for(const e of list){ e._dupName=nameCounts[(e.buyer||'').toLowerCase()]>1; e._idTag=e._dupName?String(e.buyerId||'').slice(-4):''; }
-    const qEl=document.getElementById('queue');
-    if(!list.length){ if(!qEl.querySelector('.empty')) qEl.innerHTML='<div class="empty">Queue is empty — add an order above.</div>'; slotNodes.forEach(n=>n.remove()); slotNodes.clear(); return; }
-    const em=qEl.querySelector('.empty'); if(em) em.remove();
-    const seen=new Set();
-    list.forEach((e,idx)=>{
-      seen.add(e.key); let node=slotNodes.get(e.key); const sig=slotSig(e);
-      if(!node){ node=document.createElement('div'); node.className='slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.onHold?' onhold':''); node.innerHTML=slotInner(e); node._sig=sig; slotNodes.set(e.key,node); setTimeout(()=>node.classList.remove('new'),260); }
-      else if(node._sig!==sig){ node.className='slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.onHold?' onhold':''); node.innerHTML=slotInner(e); node._sig=sig; }
-      node.classList.toggle('expanded',expandedKeys.has(e.key));
-      if(qEl.children[idx]!==node) qEl.insertBefore(node,qEl.children[idx]||null);
+    const filter = (document.getElementById('search').value||'').toLowerCase().trim();
+    // For order-number search, compare on an alphanumeric-only form so a partial
+    // like the last 6 digits matches regardless of a leading "#" or spaces.
+    const fAlnum = filter.replace(/[^a-z0-9]/g,'');
+    const matchOrderNo = (e) => fAlnum && (e.orderIds||[]).some(id =>
+      String(id).toLowerCase().replace(/[^a-z0-9]/g,'').includes(fAlnum));
+    // Detect buyers who share an identical display name with ANOTHER buyer in
+    // the queue (different people, same TikTok name). Count over the WHOLE queue
+    // so a search filter never hides a duplicate. (#4)
+    // Flag a name as duplicate only when DIFFERENT buyers share it (distinct buyer
+    // ids). With auto-combine off, one buyer legitimately has several slots, so
+    // counting by name alone would wrongly flag those repeats — keying off buyer
+    // ids means only genuinely different people sharing a name get flagged.
+    const nameIds = {};
+    for(const e of (state.queue||[])){ const n=(e.buyer||'').toLowerCase(); (nameIds[n]=nameIds[n]||new Set()).add(e.buyerId); }
+    const list = (state.queue||[]).filter(e=>!filter || e.buyer.toLowerCase().includes(filter) || matchOrderNo(e));
+    for(const e of list){
+      e._dupName = (nameIds[(e.buyer||'').toLowerCase()] ? nameIds[(e.buyer||'').toLowerCase()].size : 0) > 1;
+      e._idTag = e._dupName ? String(e.buyerId||'').slice(-4) : '';
+    }
+    const qEl = document.getElementById('queue');
+    if(!list.length){
+      if(!qEl.querySelector('.empty')) qEl.innerHTML = '<div class="empty">Queue is empty — waiting on orders.</div>';
+      slotNodes.forEach(n=>n.remove()); slotNodes.clear();
+      renderQueuePager(0, 1, 0, 0);
+      return;
+    }
+    const emptyEl = qEl.querySelector('.empty'); if(emptyEl) emptyEl.remove();
+    // Reset to page 1 whenever the search filter changes.
+    if(filter !== _lastQueueFilter){ queuePage = 1; _lastQueueFilter = filter; }
+    // Paginate: only the current page's slots are rendered; the rest are removed
+    // by the cleanup pass below, so the queue area "turns the page" in place.
+    const total = list.length;
+    const pages = Math.max(1, Math.ceil(total / QUEUE_PAGE_SIZE));
+    if(queuePage > pages) queuePage = pages;
+    if(queuePage < 1) queuePage = 1;
+    const start = (queuePage - 1) * QUEUE_PAGE_SIZE;
+    const end = Math.min(start + QUEUE_PAGE_SIZE, total);
+    const pageList = list.slice(start, end);
+    renderQueuePager(total, pages, start, end);
+    const seen = new Set();
+    pageList.forEach((e, idx) => {
+      seen.add(e.key);
+      let node = slotNodes.get(e.key);
+      const sig = slotSig(e);
+      if(!node){
+        node = document.createElement('div');
+        node.className = 'slot new'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''));
+        node.innerHTML = slotInner(e);
+        node._sig = sig;
+        slotNodes.set(e.key, node);
+        setTimeout(()=>node.classList.remove('new'), 260);
+      } else if(node._sig !== sig){
+        // update only the changed row's contents in place
+        node.className = 'slot'+(e.isPriority?' priority':'')+(e.bumped?' bumped':'')+((e.reorderedAtTop&&e.position===1)?' reorder':'')+(e.cancelRequested?' cancelreq':(e.onHold?' onhold':''));
+        node.innerHTML = slotInner(e);
+        node._sig = sig;
+      }
+      // preserve the user's expand/collapse choice across live updates
+      node.classList.toggle('expanded', expandedKeys.has(e.key));
+      // move into position ONLY if it's not already there (no needless re-attach)
+      if(qEl.children[idx] !== node) qEl.insertBefore(node, qEl.children[idx] || null);
     });
     for(const [key,node] of slotNodes){ if(!seen.has(key)){ node.remove(); slotNodes.delete(key); expandedKeys.delete(key); } }
   }
+
+  // Per-variant counter card. Rebuild the structure only when the variant
+  // DEFINITIONS change; otherwise update counts in place and never overwrite a
+  // field the operator is currently editing.
+  function renderVariantsAdmin(){
+    const box = document.getElementById('variants-admin');
+    const vs = state.variants || [];
+    if(!vs.length){ box.innerHTML=''; box._sig=''; return; }
+    const sig = vs.map(v=>v.id+':'+v.label).join('|');
+    if(box._sig !== sig){
+      box._sig = sig;
+      box.innerHTML = `<div class="vcard"><h3>Piggy Bank Counter</h3>
+        <p class="vsub">Adds +1 per unit when an order reaches the top of the queue. Shown on the public page. Counts are cumulative and persist across streams — they only change from a sale, a Save, or a Reset.</p>
+        ${vs.map(v=>`<div class="vrow" data-id="${esc(v.id)}">
+          <div class="vlab">${esc(v.label)}</div>
+          <div class="vctl">
+            <input type="number" min="0" class="vin" value="${Number(v.count)||0}" />
+            <button class="vsave" onclick="saveVariant('${esc(v.id)}', this)">Save</button>
+            <button class="vreset" onclick="resetVariant('${esc(v.id)}')">Reset</button>
+          </div>
+        </div>`).join('')}
+        <details class="vlogwrap"><summary>▾ Reset / edit log</summary><div class="vlog" id="vlog-list"></div></details>
+      </div>`;
+    } else {
+      vs.forEach(v=>{
+        const row = box.querySelector('.vrow[data-id="'+String(v.id).replace(/"/g,'\\"')+'"]');
+        if(!row) return;
+        const input = row.querySelector('.vin');
+        if(input && document.activeElement !== input) input.value = Number(v.count)||0;
+      });
+    }
+    renderVariantLog();
+  }
+  function fmtLogTime(ts){
+    try{ return new Date(ts).toLocaleString(undefined,{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'}); }
+    catch{ return ''; }
+  }
+  function renderVariantLog(){
+    const el = document.getElementById('vlog-list'); if(!el) return;
+    const log = state.variantLog || [];
+    if(!log.length){ el.innerHTML = '<div class="lr">No manual changes yet.</div>'; return; }
+    el.innerHTML = log.map(e=>{
+      const isReset = e.action === 'reset';
+      return `<div class="lr">${fmtLogTime(e.ts)} · <b>${esc(e.label||e.id)}</b> ${Number(e.from)||0}→${Number(e.to)||0}${isReset?' <span class="rst">(reset)</span>':''}</div>`;
+    }).join('');
+  }
+  async function saveVariant(id, btn){
+    const row = btn.closest('.vrow');
+    const val = Math.max(0, Math.floor(Number(row.querySelector('.vin').value)||0));
+    try{
+      await fetch('/api/variant-count/'+encodeURIComponent(id), {
+        method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({count:val})
+      });
+      btn.classList.add('saved'); btn.textContent='Saved ✓';
+      setTimeout(()=>{ btn.classList.remove('saved'); btn.textContent='Save'; }, 1200);
+    }catch{ alert("Couldn't save that count — check your connection and try again."); }
+  }
+  // Reset a single variant to 0 — requires a confirmation click first. The prior
+  // value is written to the audit log by the server so it's always recoverable.
+  async function resetVariant(id){
+    const cur = (state.variants||[]).find(v=>v.id===id);
+    const label = cur ? cur.label : id;
+    const before = cur ? (Number(cur.count)||0) : 0;
+    const ok = await uiConfirm({
+      title: 'Reset "'+label+'" to 0?',
+      body: 'This sets the '+label+' counter (currently '+before+') back to 0. The current value is saved to the reset/edit log so it can be checked later. This cannot be undone from here.',
+      confirmText: 'Reset to 0', danger:true
+    });
+    if(!ok) return;
+    try{
+      await fetch('/api/variant-count/'+encodeURIComponent(id), {
+        method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify({count:0})
+      });
+    }catch{ alert("Couldn't reset that counter — check your connection and try again."); }
+  }
+
   function render(){
-    const st=state.stats||{}; const isLive=!!st.live;
-    document.getElementById('dot').classList.toggle('live',isLive);
-    const badge=document.getElementById('liveBadge'); badge.textContent=isLive?'LIVE':'OFFLINE'; badge.classList.toggle('on',isLive);
-    const lb=document.getElementById('liveBtn'); lb.textContent=isLive?'■ End Live':'● Go Live'; lb.classList.toggle('off',!isLive);
-    document.getElementById('offline-banner').style.display=isLive?'none':'block';
-    document.getElementById('s-active').textContent=st.activeCount||0;
-    document.getElementById('s-pri').textContent=st.priorityCount||0;
-    document.getElementById('s-val').textContent=money(st.activeValue);
-    document.getElementById('s-done').textContent=st.fulfilledCount||0;
-    const chips=document.getElementById('pri-chips'); const chipSig=(state.config.priorityItems||[]).join('|');
-    if(chips._sig!==chipSig){ chips._sig=chipSig; chips.innerHTML=(state.config.priorityItems||[]).map(p=>`<span class="chip">⭐ ${esc(p)}</span>`).join(''); }
+    const st = state.stats||{};
+    const live = !!st.live;
+    // Track when the CURRENT #1 slot took the top spot. Resets whenever the top
+    // slot changes (a bump/priority displaces it, or it's fulfilled), so the
+    // per-slot "at top" timer only runs for whoever is at #1 right now.
+    const curTopKey = (state.queue && state.queue[0]) ? state.queue[0].key : null;
+    if(curTopKey !== window.__topKey){ window.__topKey = curTopKey; window.__topSince = curTopKey ? Date.now() : 0; }
+    document.getElementById('dot').classList.toggle('live', live); // green = live, red = offline
+    const badge = document.getElementById('liveBadge');
+    badge.textContent = live ? 'LIVE' : 'OFFLINE';
+    badge.classList.toggle('on', live);
+    const lb = document.getElementById('liveBtn');
+    lb.textContent = live ? '■ End Live' : '● Go Live';
+    lb.classList.toggle('off', !live);
+    document.getElementById('offline-banner').style.display = live ? 'none' : 'block';
+
+    document.getElementById('s-active').textContent = st.activeCount||0;
+    document.getElementById('s-pri').textContent = st.priorityCount||0;
+    document.getElementById('s-val').textContent = money(st.activeValue);
+    document.getElementById('s-done').textContent = st.fulfilledCount||0;
+    document.getElementById('s-avgq').textContent = fmtDur(st.avgTimeInQueueMs);
+    document.getElementById('s-avgt').textContent = fmtDur(st.avgFulfillmentMs);
+
+    const chips = document.getElementById('pri-chips');
+    const chipSig = (state.config.priorityItems||[]).join('|');
+    if(chips._sig !== chipSig){
+      chips._sig = chipSig;
+      chips.innerHTML = (state.config.priorityItems||[]).map(p=>`<span class="chip">⭐ ${esc(p)}</span>`).join('');
+      applyPriChipsPref();
+    }
+
     renderQueue();
-    const fEl=document.getElementById('fulfilled'); const f=state.fulfilled||[];
-    document.getElementById('f-count').textContent=f.length?'('+f.length+')':'';
-    const fSig=JSON.stringify(f.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
-    if(fSig!==fulfilledSig){ fulfilledSig=fSig; fEl.innerHTML=f.length?f.map(s=>`<div class="done-row"><span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span><span class="name">${esc(s.buyer)}</span><span>${s.itemCount} item${s.itemCount===1?'':'s'}</span><span style="margin-left:auto">${money(s.total)}</span><button class="undob" onclick="reopenOrder('${s.key}')">↩ Undo</button></div>`).join(''):'<div class="empty">Nothing fulfilled yet.</div>'; }
-    const cEl=document.getElementById('cancelled'); const c=state.cancelled||[];
-    document.getElementById('c-count').textContent=c.length?'('+c.length+')':'';
-    const cSig=JSON.stringify(c.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
-    if(cSig!==cancelledSig){ cancelledSig=cSig; cEl.innerHTML=c.length?c.map(s=>`<div class="done-row cancel-row"><span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span><span class="name">${esc(s.buyer)}</span><span>${s.itemCount} item${s.itemCount===1?'':'s'}</span><span style="margin-left:auto">${money(s.total)}</span><button class="undob" onclick="reopenOrder('${s.key}')">↩ Restore</button></div>`).join(''):'<div class="empty">No cancelled orders.</div>'; }
+    tickTimers();
+    renderVariantsAdmin();
+    renderClips();
+
+    const fEl = document.getElementById('fulfilled');
+    const f = state.fulfilled||[];
+    document.getElementById('f-count').textContent = f.length ? '('+f.length+')' : '';
+    const fSig = JSON.stringify(f.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
+    if(fSig !== fulfilledSig){
+      fulfilledSig = fSig;
+      fEl.innerHTML = f.length ? f.map(s=>`<div class="done-row">
+          <span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span>
+          <span class="name">${esc(s.buyer)}</span>
+          <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
+          <span style="margin-left:auto">${money(s.total)}</span>
+          <button class="undob" title="Move this order back into the queue" onclick="reopenOrder('${s.key}')">↩ Undo</button>
+        </div>`).join('') : '<div class="empty">Nothing fulfilled yet this stream.</div>';
+    }
+
+    const cEl = document.getElementById('cancelled');
+    const c = state.cancelled||[];
+    document.getElementById('c-count').textContent = c.length ? '('+c.length+')' : '';
+    const cSig = JSON.stringify(c.map(s=>[s.key,s.buyer,s.itemCount,s.total,(s.orderIds||[]).join(',')]));
+    if(cSig !== cancelledSig){
+      cancelledSig = cSig;
+      cEl.innerHTML = c.length ? c.map(s=>`<div class="done-row cancel-row">
+          <span class="ordno">${(s.orderIds||[]).map(id=>'#'+esc(id)).join(' ')}</span>
+          <span class="name">${esc(s.buyer)}</span>
+          <span>${s.itemCount} item${s.itemCount===1?'':'s'}</span>
+          <span style="margin-left:auto">${money(s.total)}</span>
+          <button class="undob" title="Put this order back into the queue" onclick="reopenOrder('${s.key}')">↩ Restore</button>
+        </div>`).join('') : '<div class="empty">No cancelled orders this stream.</div>';
+    }
+
     applyCollapse();
   }
 
-  // ---------------- Demo data generators ----------------
-  const BUYERS=['cardfiend','ripnship','mtg_maria','slabqueen','holo_hunter','binderbabe','topdeck_tom','chaserchloe','fatpackfrank','vintage_vic'];
-  const NORMAL=['Pokemon 151 pack','Lorcana booster','One Piece OP-05 pack','Bulk common lot','Prizm Football pack','Topps Chrome pack'];
-  const PRItems=['BREAK slot: PSA 10 break','Graded SLAB: PSA 9 Pikachu','Box BREAK: vintage'];
-  let bi=0;
-  function nextBuyer(){ const b=BUYERS[bi%BUYERS.length]; bi++; return {buyer:b, buyerId:'B-'+b+'-'+bi}; }
-  function pick(a){ return a[Math.floor((tick*7+idc*3)%a.length)]; }
-  function addNormal(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:pick(NORMAL),qty:1}], 5+(tick%25)); }
-  function addPriority(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:pick(PRItems),qty:1}], 60+(tick%60)); }
-  function addQtyOrder(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:'Pokemon 151 pack',qty:5}], 25); }
-  function addRepeatTop(){ const top=(state.queue||[])[0]; if(!top){ alert('Add an order first, then this adds another for whoever is #1.'); return; } pushOrder(top.buyer, top.buyerId, [{name:'BREAK add-on: extra spot',qty:1}], 15); }
-  function addSameName(){ const existing=(state.queue||[]).find(e=>!e._twin); const nm= existing?existing.buyer:'cardfiend'; if(!live) live=true; pushOrder(nm,'B-twin-'+(idc), [{name:pick(NORMAL),qty:1}], 12); }
-  function addHold(){ const b=nextBuyer(); if(!live) live=true; pushOrder(b.buyer,b.buyerId,[{name:pick(NORMAL),qty:1}], 20, true); }
-  function clearAll(){ orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null;commit(); }
+  render();
 
-  function loadSample(){
-    orders.length=0; fulfilledRecs.length=0; cancelledRecs.length=0; bumpedBuyerId=null;live=true;
-    priorityItems=['break','slab'];
-    // earlier-today: fulfill an Alex order first, so his later order flags "earlier today"
-    pushOrder('Alex','B-alex',[{name:'Prizm Football pack',qty:1}],18); fulfill('B-alex');
-    // Frosty priority BREAK jumps to #1, then adds more while #1
-    pushOrder('Frosty','B-frosty',[{name:'BREAK slot: PSA 10 break',qty:1}],120);
-    pushOrder('Frosty','B-frosty',[{name:'BREAK add-on: extra spot',qty:1}],45);
-    pushOrder('Frosty','B-frosty',[{name:'BREAK add-on: extra spot',qty:1}],45);
-    // second priority (graded slab) sits just below
-    pushOrder('SlabKing','B-slab',[{name:'Graded SLAB: PSA 9 Pikachu',qty:1}],85);
-    // merge with quantities (two different items in one bag)
-    pushOrder('Jessie','B-jess',[{name:'Pokemon 151 pack',qty:1}],24);
-    pushOrder('Jessie','B-jess',[{name:'Lorcana booster',qty:1}],9);
-    // a big-quantity order
-    pushOrder('bulkbuyer','B-bulk',[{name:'Pokemon 151 pack',qty:5}],25);
-    pushOrder('Alex','B-alex',[{name:'Topps Chrome pack',qty:1}],15); // returns -> earlier today
-    // same display name, two different accounts
-    pushOrder('Javier','B-jav1',[{name:'Bulk common lot',qty:1}],10);
-    pushOrder('Javier','B-jav2',[{name:'Prizm Football pack',qty:1}],12);
-    // hold / cancel request
-    pushOrder('CancelMe','B-cxl',[{name:'One Piece OP-05 pack',qty:1}],22,true);
-    pushOrder('jjcreel3789','B-jj',[{name:'Pokemon 151 pack',qty:1}],24);
-    // a cancelled example
-    pushOrder('oops_cancelled','B-oops',[{name:'Mystery pack',qty:1}],10);
-    const os=orders.filter(o=>o.buyerId==='B-oops');
-    cancelledRecs.push({key:'C'+(idc++),buyer:'oops_cancelled',buyerId:'B-oops',itemCount:1,total:10,orderIds:os.map(o=>o.id),_orders:os.map(o=>({...o}))});
-    removeByBuyer('B-oops');
-    commit();
+  // --- TikTok connection status ---
+  async function refreshTikTok(){
+    let s; try { s = await (await fetch('/api/tiktok-status')).json(); } catch { return; }
+    const badge = document.getElementById('ttStatus');
+    const banner = document.getElementById('tt-banner');
+    if(!s.enabled){ badge.style.display='none'; banner.style.display='none'; return; }
+    badge.style.display='';
+    if(s.connected){
+      badge.className='ttbadge ok';
+      badge.textContent = 'TikTok ✓' + (s.shop ? ' '+s.shop : '');
+      banner.style.display='none';
+    } else {
+      badge.className='ttbadge bad';
+      badge.textContent = 'TikTok ⚠ not connected';
+      banner.className='offline-banner tt-banner';
+      banner.style.display='block';
+      banner.innerHTML = '⚠ <b>TikTok isn\'t connected right now</b>, so live orders won\'t come in.'
+        + (s.authUrl ? ' <a href="'+s.authUrl+'" target="_blank">Reconnect your shop →</a>' : ' Reconnect it from the authorization link.')
+        + (s.lastError ? '<br><span style="opacity:.7;font-size:12px">('+esc(s.lastError)+')</span>' : '');
+    }
   }
-
-  loadSample();
+  if(new URLSearchParams(location.search).get('tiktok')==='connected'){
+    history.replaceState({}, '', location.pathname);
+  }
+  refreshTikTok();
+  setInterval(refreshTikTok, 30000);
 </script>
 </body>
 </html>
