@@ -228,11 +228,11 @@ export function normalizeOrder(o) {
   const items = lineItems.map((li) => {
     const product = li.product_name || '';
     // TikTok records the buyer's chosen variation/sub-variant in a SEPARATE field
-    // from the product title (e.g. product "Piggy Bank Booster Pack Bundle",
+    // from the product title (e.g. product "Booster Pack Bundle",
     // variant "Ascended Heroes"; or product "$299 Mystery Bag", variant "Rip
     // Live"). Capture it and fold it into the display name so it (a) shows in the
-    // queue for the packer and (b) is available for priority + variant-counter
-    // matching, which key off the item name/SKU text.
+    // queue for the packer and (b) is available for priority matching, which
+    // keys off the item name/SKU text.
     const variant = li.sku_name || li.variation_name || li.variation ||
       (li.sku && (li.sku.name || li.sku.sku_name)) || '';
     const base = product || li.sku_name || 'Item';

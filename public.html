@@ -37,24 +37,12 @@
   .brand b{color:var(--text);font-weight:700}
   .brand a{color:inherit;text-decoration:none}
   .brand a:hover b{color:var(--hi);text-decoration:underline}
-  /* Piggy Bank Tracker — lives IN the header. On wide screens it pins to the
-     right of the header while the title stays centered; on narrower screens it
-     drops just below the title, still inside the header (so it sits above the
-     queue on phones). */
-  #variants{margin-top:8px;width:100%}
-  .tally{display:flex;flex-direction:column;align-items:center;gap:8px}
-  .tally h2{font-size:12px;margin:0;color:var(--muted);font-weight:700;letter-spacing:.5px;text-transform:uppercase;white-space:nowrap;text-align:center}
-  .tally .grid{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
-  .vchip{display:flex;align-items:baseline;gap:7px;background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:6px 12px}
-  .vchip .vl{font-size:13px;color:var(--muted);white-space:nowrap}
-  .vchip .vn{font-size:20px;font-weight:800;font-variant-numeric:tabular-nums;color:var(--pri)}
 </style>
 </head>
 <body>
 <header>
   <h1><span id="dot" class="dot"></span>PBCC Live Queue</h1>
   <div class="sub" id="sub">Waiting for the live to start…</div>
-  <div id="variants"></div>
 </header>
 <main>
   <input id="find" class="find" placeholder="Type your username to highlight your spot…" oninput="render()" />
@@ -82,15 +70,6 @@
 
   function esc(s){return String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));}
 
-  function renderVariants(){
-    const box = document.getElementById('variants');
-    const vs = state.variants || [];
-    if(!vs.length){ box.innerHTML = ''; return; }
-    box.innerHTML = `<div class="tally"><h2>Piggy Bank Tracker</h2><div class="grid">${
-      vs.map(v=>`<div class="vchip"><span class="vl">${esc(v.label)}</span><span class="vn">${Number(v.count)||0}</span></div>`).join('')
-    }</div></div>`;
-  }
-
   function render(){
     const q = state.queue || [];
     const st = state.stats || {};
@@ -98,7 +77,6 @@
     document.getElementById('dot').classList.toggle('live', live); // green = live, red = offline
     const findBox = document.getElementById('find');
     const el = document.getElementById('list');
-    renderVariants();
 
     if(!live){
       document.getElementById('sub').textContent = 'Offline — no live running right now';
